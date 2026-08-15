@@ -37,9 +37,87 @@ env:
   DOTNET_SKIP_FIRST_TIME_EXPERIENCE: '1'
 
 jobs:
+  live-smoke-approval:
+    name: Release / Windows 11 live-smoke approval
+    if: ${{ github.event_name == 'push' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    environment: windows-11-live-smoke-approval
+    permissions:
+      contents: read
+    outputs:
+      approved_sha: ${{ steps.approval.outputs.approved_sha }}
+      approved_tag: ${{ steps.approval.outputs.approved_tag }}
+    steps:
+      - name: Validate exact commit and tag approval against protected main
+        id: approval
+        shell: pwsh
+        env:
+          API_URL: ${{ github.api_url }}
+          APPROVED_SHA: ${{ vars.WINDOWS_11_LIVE_SMOKE_APPROVED_SHA }}
+          APPROVED_TAG: ${{ vars.WINDOWS_11_LIVE_SMOKE_APPROVED_TAG }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_REF: ${{ github.ref }}
+          RELEASE_REF_TYPE: ${{ github.ref_type }}
+          RELEASE_SHA: ${{ github.sha }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+
+          $strictTagPattern = '^v(?<version>(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:0|[1-9]\d*|[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|[A-Za-z-][0-9A-Za-z-]*))*)?)$'
+          if ($env:RELEASE_REF_TYPE -cne 'tag' -or
+              $env:RELEASE_REF -cne "refs/tags/$($env:RELEASE_TAG)" -or
+              $env:RELEASE_TAG -cnotmatch $strictTagPattern) {
+            throw 'The release event is not an exact v-prefixed SemVer tag push.'
+          }
+          if ($env:RELEASE_SHA -cnotmatch '^[0-9a-f]{40}$') {
+            throw 'The release SHA is not an exact lowercase 40-character commit SHA.'
+          }
+          if ($env:APPROVED_SHA -cnotmatch '^[0-9a-f]{40}$') {
+            throw 'WINDOWS_11_LIVE_SMOKE_APPROVED_SHA is missing or is not an exact lowercase 40-character commit SHA.'
+          }
+          if ($env:APPROVED_TAG -cnotmatch $strictTagPattern) {
+            throw 'WINDOWS_11_LIVE_SMOKE_APPROVED_TAG is missing or is not a strict v-prefixed SemVer tag.'
+          }
+          if ($env:APPROVED_SHA -cne $env:RELEASE_SHA -or
+              $env:APPROVED_TAG -cne $env:RELEASE_TAG) {
+            throw 'The Windows 11 live-smoke approval does not exactly match this release commit and tag.'
+          }
+          if ($env:DEFAULT_BRANCH -cne 'main') {
+            throw 'The repository default branch is not the expected protected main branch.'
+          }
+
+          $headers = @{
+            Accept = 'application/vnd.github+json'
+            Authorization = "Bearer $env:GH_TOKEN"
+            'X-GitHub-Api-Version' = '2022-11-28'
+          }
+          $uri = "$($env:API_URL.TrimEnd('/'))/repos/$env:REPOSITORY/branches/main"
+          try {
+            $branch = Invoke-RestMethod -Method Get -Uri $uri -Headers $headers -ErrorAction Stop
+          }
+          catch {
+            throw 'GitHub API validation of the protected main branch failed.'
+          }
+
+          $mainSha = [string]$branch.commit.sha
+          if ([string]$branch.name -cne 'main' -or -not [bool]$branch.protected) {
+            throw 'GitHub API did not return the expected protected main branch.'
+          }
+          if ($mainSha -cnotmatch '^[0-9a-f]{40}$' -or $mainSha -cne $env:RELEASE_SHA) {
+            throw 'The release commit is not the exact current protected main commit.'
+          }
+
+          "approved_sha=$($env:RELEASE_SHA)" >> $env:GITHUB_OUTPUT
+          "approved_tag=$($env:RELEASE_TAG)" >> $env:GITHUB_OUTPUT
+
   test:
     name: Release / test
     if: ${{ github.event_name == 'push' }}
+    needs: live-smoke-approval
     runs-on: windows-2025
     timeout-minutes: 30
     outputs:
@@ -380,6 +458,7 @@ jobs:
     name: Release / draft GitHub Release
     if: ${{ github.event_name == 'push' }}
     needs:
+      - live-smoke-approval
       - test
       - supply-chain
     runs-on: ubuntu-24.04
@@ -387,6 +466,24 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Verify live-smoke approval handoff
+        shell: bash
+        env:
+          APPROVED_SHA: ${{ needs.live-smoke-approval.outputs.approved_sha }}
+          APPROVED_TAG: ${{ needs.live-smoke-approval.outputs.approved_tag }}
+          RELEASE_SHA: ${{ github.sha }}
+          RELEASE_TAG: ${{ needs.test.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$APPROVED_SHA" =~ ^[0-9a-f]{40}$ || "$APPROVED_SHA" != "$RELEASE_SHA" ]]; then
+            echo 'The approved live-smoke SHA was not handed off exactly.' >&2
+            exit 1
+          fi
+          if [[ -z "$APPROVED_TAG" || "$APPROVED_TAG" != "$RELEASE_TAG" ]]; then
+            echo 'The approved live-smoke tag was not handed off exactly.' >&2
+            exit 1
+          fi
+
       - name: Check out the pushed annotated release tag
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -425,9 +522,9 @@ jobs:
           release_flags=(--draft --verify-tag --title "Distraction Firewall ${PACKAGE_VERSION}")
           if [[ "$IS_PRERELEASE" == "true" ]]; then
             release_flags+=(--prerelease)
-            release_notes=$'Alpha prerelease. This build is unsigned. Hosted CI verifies format/tests, MSI tables, protected ACL/service authoring, administrative-image extraction, Burn attached-payload hashes, checksums, and the SPDX distribution inventory.\n\nNot yet validated on a real Windows 11 client: the installed finalizer performs a race-safe, fail-closed active-removal check under the capsule-store lock, but automatic Runtime/Bundle removal after the lease deadline and destructive VM evidence remain pending. Run the manual isolated-runner workflow before promotion. If Bundle uninstall reaches an active Runtime, App is removed first and Runtime remains; retry Setup after lease expiry. DisableRollback also means a failed install may leave Runtime installed, and rerunning Setup is the recovery path.\n\nVersion 0.1 must be installed by the same signed-in Windows account that will run the App. Over-the-shoulder elevation using another administrator account and LocalSystem/SYSTEM-managed deployment are unsupported.\n\nKnown enforcement alpha limits: an initial set of zero public target IPs fails activation with ActivationFailed. Seed discovery covers only the exact and www target hostnames and does not enumerate every googlevideo hostname; it is a floor, not a coverage guarantee. If the public target-IP set later falls to zero during an Active lease, health becomes Degraded. Immediate termination of dynamic YouTube CDN connections already established when a lease begins is not yet proven. A changed DHCP resolver on an already-owned interface is not refreshed during an active lease; only the initial snapshot and newly discovered interfaces are used.\n\nThe SPDX file is a distribution-artifact inventory skeleton, not a complete dependency SBOM.'
+            release_notes=$'Alpha prerelease. This build is unsigned. Hosted CI verifies format/tests, MSI tables, protected ACL/service authoring, administrative-image extraction, Burn attached-payload hashes, checksums, and the SPDX distribution inventory.\n\nPre-tag Windows 11 validation: the exact source commit accepted by this workflow passed a maintainer-attested live Windows 11 source smoke before tagging. The attached release artifacts are rebuilt by GitHub Actions and have not yet passed the manual isolated-runner artifact smoke. This Release must remain a draft and must not be published until that smoke succeeds and its evidence is reviewed.\n\nThe installed finalizer performs a race-safe, fail-closed active-removal check under the capsule-store lock, but automatic Runtime/Bundle removal after the lease deadline and destructive VM evidence remain pending. If Bundle uninstall reaches an active Runtime, App is removed first and Runtime remains; retry Setup after lease expiry. DisableRollback also means a failed install may leave Runtime installed, and rerunning Setup is the recovery path.\n\nVersion 0.1 must be installed by the same signed-in Windows account that will run the App. Over-the-shoulder elevation using another administrator account and LocalSystem/SYSTEM-managed deployment are unsupported.\n\nKnown enforcement alpha limits: an initial set of zero public target IPs fails activation with ActivationFailed. Seed discovery covers only the exact and www target hostnames and does not enumerate every googlevideo hostname; it is a floor, not a coverage guarantee. If the public target-IP set later falls to zero during an Active lease, health becomes Degraded. Immediate termination of dynamic YouTube CDN connections already established when a lease begins is not yet proven. A changed DHCP resolver on an already-owned interface is not refreshed during an active lease; only the initial snapshot and newly discovered interfaces are used.\n\nThe SPDX file is a distribution-artifact inventory skeleton, not a complete dependency SBOM.'
           else
-            release_notes=$'Stable-candidate draft only — publication is prohibited. The current Authenticode gate covers only the two outer MSI files and Setup EXE. Inner PE payload signing/verification, destructive network E2E on a real Windows 11 client, a complete dependency SBOM, and provenance/attestation are not implemented. A valid outer signature plus a nonempty deferred-uninstall evidence array is a mechanical packaging gate, not release approval. Do not publish until those controls and the reviewed Windows 11 evidence are complete.'
+            release_notes=$'Stable-candidate draft only — publication is prohibited. The exact source commit passed a pre-tag, maintainer-attested live Windows 11 source smoke, but the attached release artifacts have not yet passed the manual isolated-runner artifact smoke and must not be published until that evidence is reviewed. The current Authenticode gate covers only the two outer MSI files and Setup EXE. Inner PE payload signing/verification, destructive network E2E on a real Windows 11 client, a complete dependency SBOM, and provenance/attestation are not implemented. A valid outer signature plus a nonempty deferred-uninstall evidence array is a mechanical packaging gate, not release approval. Do not publish until those controls and the reviewed Windows 11 evidence are complete.'
           fi
           gh release create "$RELEASE_TAG" release/* "${release_flags[@]}" --notes "$release_notes"
 

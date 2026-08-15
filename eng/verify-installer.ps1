@@ -406,11 +406,11 @@ $serviceControl = $runtimeSource.Document.SelectSingleNode("//w:ServiceControl[@
 Assert-Contract ($null -ne $serviceInstall -and $serviceInstall.GetAttribute('Account') -eq 'LocalSystem' -and $serviceInstall.GetAttribute('Start') -eq 'auto' -and $serviceInstall.GetAttribute('Type') -eq 'ownProcess' -and $serviceInstall.GetAttribute('Arguments') -eq '--service') 'Activation service must be an automatic LocalSystem own-process service with the fixed --service argument.'
 Assert-Contract ($null -ne $serviceControl -and $serviceControl.GetAttribute('Start') -eq 'install' -and $serviceControl.GetAttribute('Stop') -eq 'both' -and $serviceControl.GetAttribute('Remove') -eq 'uninstall' -and $serviceControl.GetAttribute('Wait') -eq 'yes') 'Activation service control lifecycle is incomplete.'
 $serviceConfig = $serviceInstall.SelectSingleNode('w:ServiceConfig', $runtimeSource.NamespaceManager)
-$failureConfig = $serviceInstall.SelectSingleNode('w:ServiceConfigFailureActions', $runtimeSource.NamespaceManager)
-$failures = @($failureConfig.SelectNodes('w:Failure', $runtimeSource.NamespaceManager))
+$coreFailureConfigs = @($runtimeSource.Document.SelectNodes('//w:ServiceConfigFailureActions', $runtimeSource.NamespaceManager))
+$utilFailureConfigs = @($serviceInstall.SelectNodes('util:ServiceConfig', $runtimeSource.NamespaceManager))
 Assert-Contract ($null -ne $serviceConfig -and $serviceConfig.GetAttribute('DelayedAutoStart') -eq 'yes' -and $serviceConfig.GetAttribute('FailureActionsWhen') -eq 'failedToStopOrReturnedError') 'Activation service delayed start or returned-error failure handling is missing.'
-Assert-Contract ($null -ne $failureConfig -and $failureConfig.GetAttribute('ResetPeriod') -eq '86400' -and $failures.Count -eq 3 -and @($failures | Where-Object { $_.GetAttribute('Action') -ne 'restartService' }).Count -eq 0) 'Activation service must configure three restart failure actions.'
-Assert-Contract ((@($failures | ForEach-Object { $_.GetAttribute('Delay') }) -join ',') -eq '5000,15000,30000') 'Activation service restart delays must be 5, 15, and 30 seconds.'
+Assert-Contract ($coreFailureConfigs.Count -eq 0) 'Runtime authoring must not use the unreliable MSI 5 MsiServiceConfigFailureActions path.'
+Assert-Contract ($utilFailureConfigs.Count -eq 1 -and $utilFailureConfigs[0].GetAttribute('FirstFailureActionType') -eq 'restart' -and $utilFailureConfigs[0].GetAttribute('SecondFailureActionType') -eq 'restart' -and $utilFailureConfigs[0].GetAttribute('ThirdFailureActionType') -eq 'restart' -and $utilFailureConfigs[0].GetAttribute('ResetPeriodInDays') -eq '1' -and $utilFailureConfigs[0].GetAttribute('RestartServiceDelayInSeconds') -eq '5') 'Activation service must use exactly one WiX Util rollback-aware recovery action with three five-second restarts and a one-day reset period.'
 
 $finalizerFile = $runtimeSource.Document.SelectSingleNode("//w:Component[@Id='FinalizerExecutableComponent']/w:File[@Id='FinalizerExecutable' and @KeyPath='yes']", $runtimeSource.NamespaceManager)
 $runtimeGuard = $runtimeSource.Document.SelectSingleNode("//w:CustomAction[@Id='GuardRuntimeMutation']", $runtimeSource.NamespaceManager)
@@ -470,9 +470,10 @@ try {
     foreach ($requiredTable in @('Property', 'Directory', 'Component', 'File', 'Shortcut', 'LaunchCondition')) {
         Assert-Contract ($appTables -contains $requiredTable) "App MSI table is missing: $requiredTable"
     }
-    foreach ($requiredTable in @('Property', 'Directory', 'Component', 'File', 'Registry', 'ServiceInstall', 'ServiceControl', 'MsiServiceConfig', 'MsiServiceConfigFailureActions', 'MsiLockPermissionsEx', 'LaunchCondition', 'AppSearch', 'DrLocator', 'RegLocator', 'CustomAction', 'Wix4RemoveFolderEx', 'InstallExecuteSequence')) {
+    foreach ($requiredTable in @('Property', 'Directory', 'Component', 'File', 'Registry', 'ServiceInstall', 'ServiceControl', 'MsiServiceConfig', 'Wix4ServiceConfig', 'MsiLockPermissionsEx', 'LaunchCondition', 'AppSearch', 'DrLocator', 'RegLocator', 'CustomAction', 'Wix4RemoveFolderEx', 'InstallExecuteSequence')) {
         Assert-Contract ($runtimeTables -contains $requiredTable) "Runtime MSI table is missing: $requiredTable"
     }
+    Assert-Contract ($runtimeTables -notcontains 'MsiServiceConfigFailureActions') 'Runtime MSI must not contain the unreliable MsiServiceConfigFailureActions table.'
     Assert-Contract ($appTables -notcontains 'ServiceInstall') 'App MSI unexpectedly owns a Windows service.'
     Assert-Contract ((Get-MsiSummaryProperty -Context $appDatabase -Property 7) -match '^x64;') 'App MSI summary template is not x64.'
     Assert-Contract ((Get-MsiSummaryProperty -Context $runtimeDatabase -Property 7) -match '^x64;') 'Runtime MSI summary template is not x64.'
@@ -523,8 +524,28 @@ try {
     $serviceConfigurations = @(Get-MsiTableRows -Context $runtimeDatabase -Table 'MsiServiceConfig')
     Assert-Contract (@($serviceConfigurations | Where-Object { $_.Name -eq 'DistractionFirewallActivation' -and $_.Event -eq '5' -and $_.ConfigType -eq '3' -and $_.Argument -eq '1' }).Count -eq 1) 'Runtime MSI does not set delayed automatic start.'
     Assert-Contract (@($serviceConfigurations | Where-Object { $_.Name -eq 'DistractionFirewallActivation' -and $_.Event -eq '5' -and $_.ConfigType -eq '4' -and $_.Argument -eq '1' }).Count -eq 1) 'Runtime MSI does not apply failure actions to returned errors.'
-    $failureActions = @(Get-MsiTableRows -Context $runtimeDatabase -Table 'MsiServiceConfigFailureActions')
-    Assert-Contract ($failureActions.Count -eq 1 -and $failureActions[0].Name -eq 'DistractionFirewallActivation' -and $failureActions[0].ResetPeriod -eq '86400' -and $failureActions[0].Actions -eq '1[~]1[~]1' -and $failureActions[0].DelayActions -eq '5000[~]15000[~]30000') 'Runtime MSI failure-action table is incorrect.'
+    $failureActions = @(Get-MsiTableRows -Context $runtimeDatabase -Table 'Wix4ServiceConfig')
+    Assert-Contract ($failureActions.Count -eq 1 -and $failureActions[0].ServiceName -eq 'DistractionFirewallActivation' -and $failureActions[0].Component_ -eq 'ActivationServiceComponent' -and $failureActions[0].NewService -eq '1' -and $failureActions[0].FirstFailureActionType -eq 'restart' -and $failureActions[0].SecondFailureActionType -eq 'restart' -and $failureActions[0].ThirdFailureActionType -eq 'restart' -and $failureActions[0].ResetPeriodInDays -eq '1' -and $failureActions[0].RestartServiceDelayInSeconds -eq '5') 'Runtime MSI WiX Util failure-action row is incorrect.'
+
+    $customActions = @(Get-MsiTableRows -Context $runtimeDatabase -Table 'CustomAction')
+    $serviceConfigCustomActions = @(
+        [pscustomobject]@{ Action = 'Wix4SchedServiceConfig_X64'; Target = 'SchedServiceConfig'; Type = 1 },
+        [pscustomobject]@{ Action = 'Wix4ExecServiceConfig_X64'; Target = 'ExecServiceConfig'; Type = 3073 },
+        [pscustomobject]@{ Action = 'Wix4RollbackServiceConfig_X64'; Target = 'RollbackServiceConfig'; Type = 3329 }
+    )
+    $serviceConfigCustomActionRows = @($customActions | Where-Object { $_.Action -match '^Wix4(Sched|Exec|Rollback)ServiceConfig_' })
+    Assert-Contract ($serviceConfigCustomActionRows.Count -eq 3) 'Runtime MSI must contain only the x64 WiX Util service recovery schedule, execute, and rollback custom actions.'
+    foreach ($expectedAction in $serviceConfigCustomActions) {
+        $rows = @($customActions | Where-Object { $_.Action -eq $expectedAction.Action -and [int]$_.Type -eq $expectedAction.Type -and $_.Source -eq 'Wix4UtilCA_X64' -and $_.Target -eq $expectedAction.Target })
+        Assert-Contract ($rows.Count -eq 1) "Runtime MSI is missing or weakening the x64 WiX Util service recovery custom action: $($expectedAction.Action)"
+    }
+
+    $executeSequence = @(Get-MsiTableRows -Context $runtimeDatabase -Table 'InstallExecuteSequence')
+    $installServicesSequence = @($executeSequence | Where-Object { $_.Action -eq 'InstallServices' })
+    $serviceConfigSequence = @($executeSequence | Where-Object { $_.Action -eq 'Wix4SchedServiceConfig_X64' })
+    $msiConfigureServicesSequence = @($executeSequence | Where-Object { $_.Action -eq 'MsiConfigureServices' })
+    $startServicesSequence = @($executeSequence | Where-Object { $_.Action -eq 'StartServices' })
+    Assert-Contract ($installServicesSequence.Count -eq 1 -and $serviceConfigSequence.Count -eq 1 -and $msiConfigureServicesSequence.Count -eq 1 -and $startServicesSequence.Count -eq 1 -and $serviceConfigSequence[0].Condition -eq 'NOT REMOVE~="ALL" AND VersionNT > 400' -and [int]$installServicesSequence[0].Sequence -lt [int]$serviceConfigSequence[0].Sequence -and [int]$serviceConfigSequence[0].Sequence -lt [int]$msiConfigureServicesSequence[0].Sequence -and [int]$msiConfigureServicesSequence[0].Sequence -lt [int]$startServicesSequence[0].Sequence) 'WiX Util service recovery must be scheduled after service installation and before MSI delayed-start configuration and service start.'
 
     $permissionRows = @(Get-MsiTableRows -Context $runtimeDatabase -Table 'MsiLockPermissionsEx')
     Assert-Contract (@($permissionRows | Where-Object { $_.Table -eq 'CreateFolder' -and $_.SDDLText -eq $directoryAcl }).Count -eq 4) 'Runtime MSI directory ACL rows are missing or too broad.'
