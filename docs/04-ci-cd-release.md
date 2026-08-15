@@ -253,8 +253,21 @@ test groups:
 - tag: `vMAJOR.MINOR.PATCH[-prerelease]`
 - `workflow_dispatch`: 既存 tag の失敗再試行に限定
 - tag、assembly、MSI、file version の一致を最初に検証
-- tag commit が protected `main` から到達可能か検証
+- tag commit が現在の protected `main` commit と完全一致することをGitHub APIで検証
 - 同一 tag/release が存在すれば fail。asset 上書きはしない
+
+alpha tagをpushする前に、maintainerは現在のprotected `main`のexact commitを実Windows 11で検証します。成功後、protected Environment `windows-11-live-smoke-approval` の次の変数をowner/adminがout-of-bandで設定します。
+
+- `WINDOWS_11_LIVE_SMOKE_APPROVED_SHA`: lowercase 40文字のexact commit SHA
+- `WINDOWS_11_LIVE_SMOKE_APPROVED_TAG`: 公開予定のstrict `v`-prefixed SemVer tag
+
+`environment:` から未作成のEnvironment名を参照しただけでは保護は成立しません。GitHubはworkflow実行時にEnvironmentを自動作成できますが、そのEnvironmentにはprotection ruleも変数もありません。ownerは最初のtagをpushする前にSettingsで `windows-11-live-smoke-approval` を明示的に作成し、deployment tagを `v*` に限定し、required reviewerと「administratorによるprotection rule bypassを許可しない」を設定します。単独ownerのpersonal repositoryではtag pushを開始したowner自身が唯一のreviewerになるため、self-reviewは許可します。複数maintainer体制へ移行した時点でself-reviewを禁止し、tagをpushした人と承認者を分離します。
+
+releaseごとの順序は、(1) 現在のprotected `main`のexact commitを実Windows 11でsource smoke、(2) 成功したSHAとこれから作るtagをEnvironment変数へ設定、(3) 同じcommitを指すannotated tagをpush、(4) Environment待機中のjobをrequired reviewerが承認、です。Environmentが未作成、両変数が空、形式不正、またはeventのSHA/tagと不一致ならapproval jobはcheckout前にfail-closedとなり、buildもdraft Release作成も開始しません。
+
+tag pushで最初に動くGitHub-hosted approval jobは、untrusted tagをcheckoutせず、両変数をstepの `env` 経由で読みます。空値、形式不正、`github.sha` / `github.ref_name` との不一致、GitHub APIが返すdefault branch名・protection・現在の `main` SHAとの不一致をすべてfail-closedにします。workflow tokenは `contents: read` だけとし、Environment変数を自動更新する権限を与えません。`test`以下の全tag pipelineとdraft jobはこのjobの成功へ依存し、draft jobは承認済みSHA/tag outputも再検証します。
+
+この承認はexact source commitのpre-tag実機smokeを証明するものであり、GitHub Actionsが再構築した配布artifactそのものの実機検証ではありません。draft作成後は、PRから起動できない既存のmanual self-hosted Windows 11 jobで添付artifactをdownloadしてinstall/service failure actions/diagnose/uninstall smokeを行い、証跡をreviewするまでReleaseを公開しません。
 
 version 方針:
 
@@ -289,7 +302,7 @@ release-publish environment approval
 publish-release
 ```
 
-初回alphaの現行graphは `test → publish → package（任意のouter 3署名）→ hosted installer contract → checksum/SPDX inventory → draft Release` です。inner PE signing、complete SBOM、attestation、approval付きpublish jobはありません。
+初回alphaの現行graphは `pre-tag maintainer live smoke → exact SHA/tag Environment approval → hosted approval gate → test → publish → package（任意のouter 3署名）→ hosted installer contract → checksum/SPDX inventory → draft Release → manual attached-artifact smoke` です。inner PE signing、complete SBOM、attestation、approval付きpublish jobはありません。draft noteはpre-tag source smokeだけが完了し、添付artifact smokeがpendingであることと、それが成功して証跡をreviewするまで公開禁止であることを明記します。
 
 #### validate-tag
 
@@ -424,6 +437,7 @@ job ごとの追加権限:
 | Job | 追加権限 |
 |---|---|
 | CI/test/package | なし |
+| live-smoke approval | `contents: read`（protected `main` のGitHub API照合のみ） |
 | remote signing | `id-token: write` のみ必要に応じ追加 |
 | attestation | `id-token: write`, `attestations: write` |
 | draft/publish | `contents: write` |
@@ -435,6 +449,8 @@ job ごとの追加権限:
 - untrusted code を実行する `pull_request_target` を禁止する。
 - fork PR へ secret、OIDC signing、self-hosted runner access を渡さない。
 - Environment deployment branch/tag rule は `v*` と protected source に限定する。
+- `windows-11-live-smoke-approval` Environmentの承認SHA/tagはowner/adminだけが手動設定し、workflowへVariables write権限を与えない。
+- live-smoke approval jobはtag pushだけ、destructive self-hosted smokeはtrusted `workflow_dispatch`だけで実行し、PRから起動可能にしない。
 - `release-signing` と `release-publish` に required reviewer を置き、admin bypass を無効化する。
 - job ごとに timeout、workflow に concurrency を設定する。Release は `cancel-in-progress: false`。
 - untrusted text を shell command や release script へ展開しない。

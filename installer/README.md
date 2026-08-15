@@ -21,6 +21,20 @@ also seeds the 64-bit owner/product registry values and the empty
 `dns\observations\observed-addresses.json` store; the service, not MSI, creates
 the per-lease target snapshot.
 
+Service recovery actions use WiX Util `ServiceConfig`, whose deferred x64
+custom action opens the service with restart permission. Because this element
+is nested under `ServiceInstall`, the compiled `Wix4ServiceConfig` row has
+`NewService=1`: a failed first install relies on MSI rollback removing the newly
+created service. The same authored flag is retained during repair, so the Util
+custom action does not guarantee a snapshot of the repair-time pre-existing
+failure-action settings for rollback; if a later repair step fails, the desired
+recovery settings may remain applied. The MSI 5
+`MsiServiceConfigFailureActions` standard-action path is
+explicitly prohibited because it can fail with Error 1939 while configuring
+`SC_ACTION_RESTART`. Recovery is three restart attempts with a shared
+five-second delay and a one-day failure-count reset period. Delayed automatic
+start and returned-error handling remain in the MSI service configuration.
+
 ## Version 0.1 owner-account contract
 
 Version 0.1 supports installation only when Setup is launched by the same
