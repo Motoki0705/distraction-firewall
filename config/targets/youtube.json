@@ -1,0 +1,114 @@
+[
+  {
+    "stable_id": "youtube",
+    "display_name": "YouTube",
+    "catalog_version": "1.0.0",
+    "exact_hosts": [
+      "youtu.be",
+      "youtube.googleapis.com",
+      "youtubei.googleapis.com",
+      "yt3.ggpht.com"
+    ],
+    "suffix_hosts": [
+      "youtube.com",
+      "youtube-nocookie.com",
+      "youtubeeducation.com",
+      "googlevideo.com",
+      "ytimg.com"
+    ],
+    "cname_suffixes": [
+      "youtube-ui.l.google.com",
+      "googlevideo.com"
+    ],
+    "seed_hosts": [
+      "www.youtube.com"
+    ],
+    "browser_url_patterns": [
+      "*://youtube.com/*",
+      "*://*.youtube.com/*",
+      "*://youtu.be/*",
+      "*://youtube-nocookie.com/*",
+      "*://*.youtube-nocookie.com/*",
+      "*://youtubeeducation.com/*",
+      "*://*.youtubeeducation.com/*",
+      "*://youtube.googleapis.com/*",
+      "*://youtubei.googleapis.com/*",
+      "*://www.googleapis.com/youtube/*",
+      "*://googlevideo.com/*",
+      "*://*.googlevideo.com/*",
+      "*://ytimg.com/*",
+      "*://*.ytimg.com/*",
+      "*://yt3.ggpht.com/*"
+    ],
+    "ip_block_policy": {
+      "mode": "dns_observed",
+      "source_fields": [
+        "exact_hosts",
+        "suffix_hosts",
+        "cname_suffixes",
+        "seed_hosts"
+      ],
+      "address_families": [
+        "ipv4",
+        "ipv6"
+      ],
+      "transport_protocols": [
+        "tcp",
+        "udp"
+      ],
+      "follow_cname_chain": true,
+      "max_observation_ttl_seconds": 900,
+      "shared_address_action": "block"
+    },
+    "known_collateral": [
+      {
+        "rule_field": "suffix_hosts",
+        "rule_value": "googlevideo.com",
+        "purpose": "YouTube video and audio media delivery CDN",
+        "severity": "high",
+        "risk": "The suffix is intentionally broad because media hosts are dynamically named. Embedded YouTube playback on unrelated sites is also blocked, and resolved CDN addresses can be shared beyond a single request.",
+        "mitigation": "Create address rules only from catalog-attributed DNS observations, cap their lifetime, and continuously test non-YouTube Google traffic for collateral damage."
+      },
+      {
+        "rule_field": "suffix_hosts",
+        "rule_value": "ytimg.com",
+        "purpose": "YouTube thumbnails, player resources, and static assets",
+        "severity": "medium",
+        "risk": "YouTube images and player assets embedded by third-party pages disappear even when the containing page is not a YouTube property.",
+        "mitigation": "Treat this as expected strict-mode collateral and verify that unrelated static Google properties remain reachable."
+      },
+      {
+        "rule_field": "exact_hosts",
+        "rule_value": "yt3.ggpht.com",
+        "purpose": "YouTube channel avatars, badges, emoji, and related images",
+        "severity": "medium",
+        "risk": "ggpht.com is shared Google infrastructure; only the observed YouTube-specific yt3 host is listed, but its resolved addresses may still serve other Google content.",
+        "mitigation": "Do not widen this rule to ggpht.com or *.ggpht.com, and apply the shared-address safeguards in ip_block_policy."
+      },
+      {
+        "rule_field": "browser_url_patterns",
+        "rule_value": "*://www.googleapis.com/youtube/*",
+        "purpose": "Legacy YouTube Data API path on the shared Google APIs host",
+        "severity": "medium",
+        "risk": "Blocking the entire www.googleapis.com host would disrupt unrelated Google APIs, while host-only DNS and IP layers cannot distinguish the YouTube path.",
+        "mitigation": "Keep this rule path-scoped in browser policy and never promote www.googleapis.com to exact_hosts, suffix_hosts, or CNAME-derived IP blocking."
+      },
+      {
+        "rule_field": "cname_suffixes",
+        "rule_value": "youtube-ui.l.google.com",
+        "purpose": "YouTube web frontend canonical-name attribution",
+        "severity": "medium",
+        "risk": "The name is under Google's shared l.google.com infrastructure and its resolved frontend addresses can host more than one Google service.",
+        "mitigation": "Match only the full YouTube-specific suffix and never generalize the rule to l.google.com or google.com."
+      },
+      {
+        "rule_field": "ip_block_policy",
+        "rule_value": "dns_observed/shared_address_action=block",
+        "purpose": "Stop cached or already-established YouTube TCP and QUIC media flows",
+        "severity": "high",
+        "risk": "Address-level enforcement cannot distinguish hostnames that share an IPv4 or IPv6 address, so unrelated traffic to a shared Google edge can be interrupted.",
+        "mitigation": "Use only target-attributed observations, support both address families and TCP/UDP, expire observations after at most 900 seconds, and remove all owned rules at the lease deadline."
+      }
+    ]
+  }
+]

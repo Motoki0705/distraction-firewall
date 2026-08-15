@@ -1,0 +1,29 @@
+[
+  {
+    "stable_id": "ttl-out-of-range",
+    "display_name": "TTL out of range",
+    "catalog_version": "1.0.0",
+    "exact_hosts": [
+      "ttl.example"
+    ],
+    "suffix_hosts": [],
+    "cname_suffixes": [],
+    "browser_url_patterns": [],
+    "ip_block_policy": {
+      "mode": "dns_observed",
+      "source_fields": [
+        "exact_hosts"
+      ],
+      "address_families": [
+        "ipv4"
+      ],
+      "transport_protocols": [
+        "tcp"
+      ],
+      "follow_cname_chain": false,
+      "max_observation_ttl_seconds": 86401,
+      "shared_address_action": "observe"
+    },
+    "known_collateral": []
+  }
+]

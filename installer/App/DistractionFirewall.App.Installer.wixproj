@@ -1,0 +1,16 @@
+<Project Sdk="WixToolset.Sdk/5.0.2">
+  <PropertyGroup>
+    <MsiVersion Condition="'$(MsiVersion)' == ''">0.1.0</MsiVersion>
+    <PackageSemanticVersion Condition="'$(PackageSemanticVersion)' == ''">0.1.0-alpha.1</PackageSemanticVersion>
+    <OutputName Condition="'$(OutputName)' == ''">distraction-firewall-app-$(PackageSemanticVersion)-win-x64</OutputName>
+    <OutputPath Condition="'$(OutputPath)' == ''">$(MSBuildThisFileDirectory)..\..\artifacts\package\</OutputPath>
+    <AppPublishDir Condition="'$(AppPublishDir)' == ''">$(MSBuildThisFileDirectory)..\..\artifacts\publish\DistractionFirewall.App\win-x64</AppPublishDir>
+    <CliPublishDir Condition="'$(CliPublishDir)' == ''">$(MSBuildThisFileDirectory)..\..\artifacts\publish\DistractionFirewall.Cli\win-x64</CliPublishDir>
+    <DefineConstants>$(DefineConstants);MsiVersion=$(MsiVersion);PackageSemanticVersion=$(PackageSemanticVersion)</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <BindPath BindName="AppPublish" Include="$(AppPublishDir)" />
+    <BindPath BindName="CliPublish" Include="$(CliPublishDir)" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,46 @@
+[
+  {
+    "stable_id": "a",
+    "display_name": "A",
+    "catalog_version": "999999.999999.999999-rc.1+fixture",
+    "exact_hosts": [
+      "a.example"
+    ],
+    "suffix_hosts": [],
+    "cname_suffixes": [],
+    "browser_url_patterns": [],
+    "ip_block_policy": {
+      "mode": "disabled"
+    },
+    "known_collateral": []
+  },
+  {
+    "stable_id": "max-observation-ttl",
+    "display_name": "Maximum observation TTL",
+    "catalog_version": "999999.999999.999999-rc.1+fixture",
+    "exact_hosts": [],
+    "suffix_hosts": [
+      "edge.example"
+    ],
+    "cname_suffixes": [],
+    "browser_url_patterns": [],
+    "ip_block_policy": {
+      "mode": "dns_observed",
+      "source_fields": [
+        "suffix_hosts"
+      ],
+      "address_families": [
+        "ipv4",
+        "ipv6"
+      ],
+      "transport_protocols": [
+        "tcp",
+        "udp"
+      ],
+      "follow_cname_chain": false,
+      "max_observation_ttl_seconds": 86400,
+      "shared_address_action": "block"
+    },
+    "known_collateral": []
+  }
+]

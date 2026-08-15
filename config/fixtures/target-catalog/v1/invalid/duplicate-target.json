@@ -1,0 +1,32 @@
+[
+  {
+    "stable_id": "duplicate-target",
+    "display_name": "Duplicate target",
+    "catalog_version": "1.0.0",
+    "exact_hosts": [
+      "duplicate-target.example"
+    ],
+    "suffix_hosts": [],
+    "cname_suffixes": [],
+    "browser_url_patterns": [],
+    "ip_block_policy": {
+      "mode": "disabled"
+    },
+    "known_collateral": []
+  },
+  {
+    "stable_id": "duplicate-target",
+    "display_name": "Duplicate target",
+    "catalog_version": "1.0.0",
+    "exact_hosts": [
+      "duplicate-target.example"
+    ],
+    "suffix_hosts": [],
+    "cname_suffixes": [],
+    "browser_url_patterns": [],
+    "ip_block_policy": {
+      "mode": "disabled"
+    },
+    "known_collateral": []
+  }
+]

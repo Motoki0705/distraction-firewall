@@ -1,0 +1,84 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+    Name="Distraction Firewall App"
+    Manufacturer="Motoki0705"
+    Version="$(MsiVersion)"
+    UpgradeCode="{F6467493-5819-4046-900A-C9FDF87DF7C1}"
+    InstallerVersion="500"
+    Scope="perMachine">
+    <MediaTemplate EmbedCab="yes" />
+    <MajorUpgrade
+      DowngradeErrorMessage="A newer version of Distraction Firewall App is already installed."
+      Schedule="afterInstallExecute" />
+
+    <Property Id="DF_PACKAGE_SEMANTIC_VERSION" Value="$(PackageSemanticVersion)" />
+    <Property Id="DF_DEFERRED_ACTIVE_UNINSTALL_IMPLEMENTED" Value="0" />
+    <Property Id="ARPCOMMENTS" Value="Distraction Firewall desktop application and command-line client." />
+    <Property Id="ARPNOMODIFY" Value="1" />
+
+    <Property Id="DF_WINDOWS_BUILD" Secure="yes">
+      <RegistrySearch
+        Id="FindWindowsBuild"
+        Root="HKLM"
+        Key="SOFTWARE\Microsoft\Windows NT\CurrentVersion"
+        Name="CurrentBuildNumber"
+        Type="raw"
+        Bitness="always64" />
+    </Property>
+    <Property Id="DF_WINDOWS_INSTALLATION_TYPE" Secure="yes">
+      <RegistrySearch
+        Id="FindWindowsInstallationType"
+        Root="HKLM"
+        Key="SOFTWARE\Microsoft\Windows NT\CurrentVersion"
+        Name="InstallationType"
+        Type="raw"
+        Bitness="always64" />
+    </Property>
+    <Launch
+      Condition="ACTION = &quot;ADMIN&quot; OR Installed OR (VersionNT64 AND DF_WINDOWS_BUILD &gt;= 22000 AND DF_WINDOWS_INSTALLATION_TYPE = &quot;Client&quot;)"
+      Message="Distraction Firewall requires a Windows 11 client installation on an x64 computer." />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="AppInstallFolder" Name="Distraction Firewall">
+        <Directory Id="AppFolder" Name="app" />
+        <Directory Id="CliFolder" Name="cli" />
+      </Directory>
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ApplicationProgramsFolder" Name="Distraction Firewall" />
+    </StandardDirectory>
+
+    <Component
+      Id="AppExecutableComponent"
+      Guid="{6ECB595B-A7B8-4E1F-911E-D1B02D47C275}"
+      Directory="AppFolder">
+      <File
+        Id="AppExecutable"
+        Source="!(bindpath.AppPublish)\distraction-firewall.exe"
+        KeyPath="yes">
+        <Shortcut
+          Id="AppStartMenuShortcut"
+          Directory="ApplicationProgramsFolder"
+          Name="Distraction Firewall"
+          Description="Configure a distraction blocking session."
+          WorkingDirectory="AppFolder"
+          Advertise="yes" />
+      </File>
+      <RemoveFolder
+        Id="RemoveApplicationProgramsFolder"
+        Directory="ApplicationProgramsFolder"
+        On="uninstall" />
+    </Component>
+
+    <Feature Id="AppFeature" Title="Distraction Firewall App">
+      <ComponentRef Id="AppExecutableComponent" />
+      <Files Directory="AppFolder" Include="!(bindpath.AppPublish)\**">
+        <Exclude Files="!(bindpath.AppPublish)\distraction-firewall.exe" />
+        <Exclude Files="!(bindpath.AppPublish)\**\*.pdb" />
+      </Files>
+      <Files Directory="CliFolder" Include="!(bindpath.CliPublish)\**">
+        <Exclude Files="!(bindpath.CliPublish)\**\*.pdb" />
+      </Files>
+    </Feature>
+  </Package>
+</Wix>

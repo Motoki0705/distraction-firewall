@@ -1,0 +1,17 @@
+[
+  {
+    "stable_id": "numeric-enum",
+    "display_name": "Numeric enum",
+    "catalog_version": "1.0.0",
+    "exact_hosts": [
+      "numeric.example"
+    ],
+    "suffix_hosts": [],
+    "cname_suffixes": [],
+    "browser_url_patterns": [],
+    "ip_block_policy": {
+      "mode": 0
+    },
+    "known_collateral": []
+  }
+]

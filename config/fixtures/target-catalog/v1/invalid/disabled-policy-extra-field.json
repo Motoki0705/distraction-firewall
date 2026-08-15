@@ -1,0 +1,18 @@
+[
+  {
+    "stable_id": "disabled-policy-extra-field",
+    "display_name": "Disabled policy extra field",
+    "catalog_version": "1.0.0",
+    "exact_hosts": [
+      "disabled.example"
+    ],
+    "suffix_hosts": [],
+    "cname_suffixes": [],
+    "browser_url_patterns": [],
+    "ip_block_policy": {
+      "mode": "disabled",
+      "follow_cname_chain": false
+    },
+    "known_collateral": []
+  }
+]

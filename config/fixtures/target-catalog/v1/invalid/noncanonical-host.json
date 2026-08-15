@@ -1,0 +1,17 @@
+[
+  {
+    "stable_id": "noncanonical-host",
+    "display_name": "Non-canonical host",
+    "catalog_version": "1.0.0",
+    "exact_hosts": [
+      "WWW.Example.com"
+    ],
+    "suffix_hosts": [],
+    "cname_suffixes": [],
+    "browser_url_patterns": [],
+    "ip_block_policy": {
+      "mode": "disabled"
+    },
+    "known_collateral": []
+  }
+]

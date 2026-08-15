@@ -1,0 +1,7 @@
+<Project>
+  <Target Name="EnforceDeferredActiveUninstallGate" BeforeTargets="CoreCompile">
+    <Error
+      Condition="'$(RequireDeferredActiveUninstall)' == 'true' and '$(DeferredActiveUninstallImplemented)' != 'true'"
+      Text="Stable packaging is blocked: deferred active uninstall has not been implemented and verified." />
+  </Target>
+</Project>

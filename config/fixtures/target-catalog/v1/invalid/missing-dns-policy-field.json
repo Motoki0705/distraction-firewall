@@ -1,0 +1,27 @@
+[
+  {
+    "stable_id": "missing-dns-policy-field",
+    "display_name": "Missing DNS policy field",
+    "catalog_version": "1.0.0",
+    "exact_hosts": [
+      "missing-policy.example"
+    ],
+    "suffix_hosts": [],
+    "cname_suffixes": [],
+    "browser_url_patterns": [],
+    "ip_block_policy": {
+      "mode": "dns_observed",
+      "source_fields": [
+        "exact_hosts"
+      ],
+      "address_families": [
+        "ipv4"
+      ],
+      "transport_protocols": [
+        "tcp"
+      ],
+      "max_observation_ttl_seconds": 60
+    },
+    "known_collateral": []
+  }
+]

@@ -1,0 +1,307 @@
+<Wix
+  xmlns="http://wixtoolset.org/schemas/v4/wxs"
+  xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+  <Package
+    Name="Distraction Firewall Lease Runtime"
+    Manufacturer="Motoki0705"
+    Version="$(MsiVersion)"
+    UpgradeCode="{275EC377-2EB2-487F-AD4B-BA0BA85C2FFB}"
+    InstallerVersion="500"
+    Scope="perMachine">
+    <MediaTemplate EmbedCab="yes" />
+    <MajorUpgrade
+      DowngradeErrorMessage="A newer version of Distraction Firewall Lease Runtime is already installed."
+      Schedule="afterInstallExecute" />
+
+    <Property Id="DF_PACKAGE_SEMANTIC_VERSION" Value="$(PackageSemanticVersion)" />
+    <Property Id="DF_DEFERRED_ACTIVE_UNINSTALL_IMPLEMENTED" Value="0" />
+    <Property Id="ARPSYSTEMCOMPONENT" Value="1" />
+    <Property
+      Id="ARPCOMMENTS"
+      Value="Protected lease runtime. Active-lease removal is refused; deferred removal remains unavailable in alpha." />
+
+    <Property Id="DF_WINDOWS_BUILD" Secure="yes">
+      <RegistrySearch
+        Id="FindWindowsBuild"
+        Root="HKLM"
+        Key="SOFTWARE\Microsoft\Windows NT\CurrentVersion"
+        Name="CurrentBuildNumber"
+        Type="raw"
+        Bitness="always64" />
+    </Property>
+    <Property Id="DF_WINDOWS_INSTALLATION_TYPE" Secure="yes">
+      <RegistrySearch
+        Id="FindWindowsInstallationType"
+        Root="HKLM"
+        Key="SOFTWARE\Microsoft\Windows NT\CurrentVersion"
+        Name="InstallationType"
+        Type="raw"
+        Bitness="always64" />
+    </Property>
+    <Property Id="DF_RUNTIME_DATA_ROOT_FROM_REGISTRY" Hidden="yes" Secure="yes">
+      <RegistrySearch
+        Id="FindRuntimeDataRoot"
+        Root="HKLM"
+        Key="SOFTWARE\Motoki0705\DistractionFirewall\Runtime"
+        Name="DataRoot"
+        Type="raw"
+        Bitness="always64" />
+    </Property>
+    <Property Id="DF_ACTIVE_LEASE_FILE" Hidden="yes" Secure="yes">
+      <DirectorySearch
+        Id="FindRuntimeDataDirectory"
+        Path="[CommonAppDataFolder]DistractionFirewall\Runtime\v1"
+        Depth="0">
+        <FileSearch Id="FindActiveLeaseFile" Name="active-lease.json" />
+      </DirectorySearch>
+    </Property>
+    <SetProperty
+      Id="DfRuntimeDataRoot"
+      Value="[DF_RUNTIME_DATA_ROOT_FROM_REGISTRY]"
+      After="AppSearch"
+      Sequence="both"
+      Condition="DF_RUNTIME_DATA_ROOT_FROM_REGISTRY" />
+
+    <Launch
+      Condition="ACTION = &quot;ADMIN&quot; OR Installed OR (VersionNT64 AND DF_WINDOWS_BUILD &gt;= 22000 AND DF_WINDOWS_INSTALLATION_TYPE = &quot;Client&quot;)"
+      Message="Distraction Firewall requires a Windows 11 client installation on an x64 computer." />
+    <Launch
+      Condition="ACTION = &quot;ADMIN&quot; OR Installed OR UserSID"
+      Message="Version 0.1 must be installed interactively by the same signed-in user who will run the App. LocalSystem, service-account, broad-principal, and over-the-shoulder managed installs are not supported." />
+    <Launch
+      Condition="ACTION = &quot;ADMIN&quot; OR Installed OR (UserSID &lt;&gt; &quot;S-1-0-0&quot; AND UserSID &lt;&gt; &quot;S-1-1-0&quot; AND UserSID &lt;&gt; &quot;S-1-2-0&quot; AND UserSID &lt;&gt; &quot;S-1-5-7&quot; AND UserSID &lt;&gt; &quot;S-1-5-11&quot; AND UserSID &lt;&gt; &quot;S-1-5-18&quot;)"
+      Message="Version 0.1 must be installed interactively by the same signed-in user who will run the App. LocalSystem, service-account, broad-principal, and over-the-shoulder managed installs are not supported." />
+    <Launch
+      Condition="ACTION = &quot;ADMIN&quot; OR Installed OR (UserSID &lt;&gt; &quot;S-1-5-19&quot; AND UserSID &lt;&gt; &quot;S-1-5-20&quot; AND UserSID &lt;&gt; &quot;S-1-5-32-544&quot; AND UserSID &lt;&gt; &quot;S-1-5-32-545&quot; AND UserSID &lt;&gt; &quot;S-1-5-32-546&quot;)"
+      Message="Version 0.1 must be installed interactively by the same signed-in user who will run the App. LocalSystem, service-account, broad-principal, and over-the-shoulder managed installs are not supported." />
+    <Launch
+      Condition="ACTION = &quot;ADMIN&quot; OR Installed OR NOT DF_ACTIVE_LEASE_FILE"
+      Message="The Lease Runtime cannot be installed or upgraded while active-lease.json exists. Wait for the lease to finish and retry." />
+    <Launch
+      Condition="NOT (Installed AND REMOVE~=&quot;ALL&quot; AND DF_ACTIVE_LEASE_FILE)"
+      Message="The Lease Runtime cannot be removed while a blocking lease is active. The App may already have been removed; retry setup after the lease expires." />
+    <Launch
+      Condition="NOT (Installed AND (REINSTALL OR PATCH) AND DF_ACTIVE_LEASE_FILE)"
+      Message="The Lease Runtime cannot be repaired or patched while a blocking lease is active. Wait for the lease to finish and retry." />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="RuntimeInstallFolder" Name="Distraction Firewall Lease Runtime">
+        <Directory Id="ActivationServiceFolder" Name="activation-service" />
+        <Directory Id="LeaseWorkerFolder" Name="lease-worker" />
+        <Directory Id="DnsFilterFolder" Name="dns-filter" />
+        <Directory Id="FinalizerFolder" Name="finalizer" />
+        <Directory Id="EnforcementFolder" Name="enforcement" />
+      </Directory>
+    </StandardDirectory>
+    <StandardDirectory Id="CommonAppDataFolder">
+      <Directory Id="ProductDataFolder" Name="DistractionFirewall">
+        <Directory Id="RuntimeDataParentFolder" Name="Runtime">
+          <Directory Id="RuntimeDataFolder" Name="v1">
+            <Directory Id="OwnershipLedgerFolder" Name="ownership-ledger" />
+            <Directory Id="DnsStateFolder" Name="dns">
+              <Directory Id="DnsObservationsFolder" Name="observations" />
+            </Directory>
+          </Directory>
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+
+    <Component
+      Id="ActivationServiceComponent"
+      Guid="{5FCE6AB7-4286-463B-A976-6DB8943E3A57}"
+      Directory="ActivationServiceFolder">
+      <File
+        Id="ActivationServiceExecutable"
+        Source="!(bindpath.ActivationServicePublish)\distraction-firewall-activation-service.exe"
+        KeyPath="yes" />
+      <ServiceInstall
+        Id="ActivationServiceInstall"
+        Name="DistractionFirewallActivation"
+        DisplayName="Distraction Firewall Activation Service"
+        Description="Owns time-bounded distraction-blocking leases and restores enforcement after restart."
+        Type="ownProcess"
+        Start="auto"
+        ErrorControl="normal"
+        Account="LocalSystem"
+        Arguments="--service"
+        Vital="yes">
+        <ServiceConfig
+          DelayedAutoStart="yes"
+          FailureActionsWhen="failedToStopOrReturnedError"
+          OnInstall="yes"
+          OnReinstall="yes" />
+        <ServiceConfigFailureActions
+          ResetPeriod="86400"
+          OnInstall="yes"
+          OnReinstall="yes">
+          <Failure Action="restartService" Delay="5000" />
+          <Failure Action="restartService" Delay="15000" />
+          <Failure Action="restartService" Delay="30000" />
+        </ServiceConfigFailureActions>
+      </ServiceInstall>
+      <ServiceControl
+        Id="ActivationServiceControl"
+        Name="DistractionFirewallActivation"
+        Start="install"
+        Stop="both"
+        Remove="uninstall"
+        Wait="yes" />
+    </Component>
+
+    <Component
+      Id="FinalizerExecutableComponent"
+      Guid="{12B1E43B-A46C-45F2-8F40-9A7DFA61FF31}"
+      Directory="FinalizerFolder">
+      <File
+        Id="FinalizerExecutable"
+        Source="!(bindpath.FinalizerPublish)\distraction-firewall-finalizer.exe"
+        KeyPath="yes" />
+    </Component>
+
+    <Component
+      Id="RuntimeDataAclComponent"
+      Guid="{BF557F90-CE0A-400F-A0C3-08692E304F77}"
+      Directory="RuntimeDataFolder"
+      KeyPath="yes">
+      <CreateFolder>
+        <PermissionEx Sddl="D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)" />
+      </CreateFolder>
+    </Component>
+    <Component
+      Id="OwnershipLedgerAclComponent"
+      Guid="{0161747A-D337-4714-BAAD-5EB1733DE385}"
+      Directory="OwnershipLedgerFolder"
+      KeyPath="yes">
+      <CreateFolder>
+        <PermissionEx Sddl="D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)" />
+      </CreateFolder>
+    </Component>
+    <Component
+      Id="DnsStateAclComponent"
+      Guid="{FBAE6687-3FCC-42EE-A5D9-2690F642E4C0}"
+      Directory="DnsStateFolder"
+      KeyPath="yes">
+      <CreateFolder>
+        <PermissionEx Sddl="D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)" />
+      </CreateFolder>
+    </Component>
+    <Component
+      Id="DnsObservationsAclComponent"
+      Guid="{1B5AEAEF-0ED6-4901-944B-75938A598F1B}"
+      Directory="DnsObservationsFolder"
+      KeyPath="yes">
+      <CreateFolder>
+        <PermissionEx Sddl="D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)" />
+      </CreateFolder>
+    </Component>
+    <Component
+      Id="ObservedAddressesComponent"
+      Guid="{F6D8CDE7-418D-48EB-A974-C5659954E45D}"
+      Directory="DnsObservationsFolder">
+      <File
+        Id="ObservedAddressesFile"
+        Source="!(bindpath.InstallerFixtures)\observed-addresses.json"
+        Name="observed-addresses.json"
+        KeyPath="yes">
+        <PermissionEx Sddl="D:P(A;;FA;;;SY)(A;;FA;;;BA)" />
+      </File>
+    </Component>
+
+    <Component
+      Id="RuntimeInstallerSeedComponent"
+      Guid="{5ADD6990-B25E-40CA-B9F4-646C777AA341}"
+      Directory="RuntimeDataFolder"
+      Bitness="always64"
+      NeverOverwrite="yes">
+      <RegistryValue
+        Id="RuntimeOwnerSid"
+        Root="HKLM"
+        Key="SOFTWARE\Motoki0705\DistractionFirewall\Runtime"
+        Name="OwnerSid"
+        Type="string"
+        Value="[UserSID]"
+        KeyPath="yes" />
+      <RegistryValue
+        Id="RuntimeProductInstanceId"
+        Root="HKLM"
+        Key="SOFTWARE\Motoki0705\DistractionFirewall\Runtime"
+        Name="ProductInstanceId"
+        Type="string"
+        Value="Motoki0705.DistractionFirewall.Runtime.v1" />
+      <RegistryValue
+        Id="RuntimeDataRootRegistryValue"
+        Root="HKLM"
+        Key="SOFTWARE\Motoki0705\DistractionFirewall\Runtime"
+        Name="DataRoot"
+        Type="string"
+        Value="[RuntimeDataFolder]" />
+      <util:RemoveFolderEx
+        Id="RemoveRuntimeDataTree"
+        Property="DfRuntimeDataRoot"
+        On="uninstall"
+        Condition="NOT DF_ACTIVE_LEASE_FILE" />
+    </Component>
+
+    <!--
+      StopServices first waits for the LocalSystem service to stop. This
+      deferred, non-impersonated guard then takes the capsule-store lock and
+      fails closed if a lease is active. On full removal, a second checked
+      finalizer action re-guards and removes only owned installation-scoped OS
+      objects. Both run before service or payload deletion. A checked failure
+      aborts the MSI transaction so Windows Installer can roll the stopped
+      service back to its pre-transaction state.
+    -->
+    <CustomAction
+      Id="GuardRuntimeMutation"
+      FileRef="FinalizerExecutable"
+      ExeCommand="guard-runtime-uninstall"
+      Execute="deferred"
+      Impersonate="no"
+      Return="check" />
+    <CustomAction
+      Id="CleanupRuntimeInstallation"
+      FileRef="FinalizerExecutable"
+      ExeCommand="cleanup-runtime-installation"
+      Execute="deferred"
+      Impersonate="no"
+      Return="check" />
+    <InstallExecuteSequence>
+      <Custom
+        Action="GuardRuntimeMutation"
+        After="StopServices"
+        Condition="Installed AND (REMOVE~=&quot;ALL&quot; OR REINSTALL OR PATCH)" />
+      <Custom
+        Action="CleanupRuntimeInstallation"
+        After="GuardRuntimeMutation"
+        Condition="Installed AND REMOVE~=&quot;ALL&quot;" />
+    </InstallExecuteSequence>
+
+    <Feature Id="RuntimeFeature" Title="Distraction Firewall Lease Runtime">
+      <ComponentRef Id="ActivationServiceComponent" />
+      <ComponentRef Id="FinalizerExecutableComponent" />
+      <ComponentRef Id="RuntimeDataAclComponent" />
+      <ComponentRef Id="OwnershipLedgerAclComponent" />
+      <ComponentRef Id="DnsStateAclComponent" />
+      <ComponentRef Id="DnsObservationsAclComponent" />
+      <ComponentRef Id="ObservedAddressesComponent" />
+      <ComponentRef Id="RuntimeInstallerSeedComponent" />
+      <Files Directory="ActivationServiceFolder" Include="!(bindpath.ActivationServicePublish)\**">
+        <Exclude Files="!(bindpath.ActivationServicePublish)\distraction-firewall-activation-service.exe" />
+        <Exclude Files="!(bindpath.ActivationServicePublish)\**\*.pdb" />
+      </Files>
+      <Files Directory="LeaseWorkerFolder" Include="!(bindpath.LeaseWorkerPublish)\**">
+        <Exclude Files="!(bindpath.LeaseWorkerPublish)\**\*.pdb" />
+      </Files>
+      <Files Directory="DnsFilterFolder" Include="!(bindpath.DnsFilterPublish)\**">
+        <Exclude Files="!(bindpath.DnsFilterPublish)\**\*.pdb" />
+      </Files>
+      <Files Directory="FinalizerFolder" Include="!(bindpath.FinalizerPublish)\**">
+        <Exclude Files="!(bindpath.FinalizerPublish)\distraction-firewall-finalizer.exe" />
+        <Exclude Files="!(bindpath.FinalizerPublish)\**\*.pdb" />
+      </Files>
+      <Files Directory="EnforcementFolder" Include="!(bindpath.EnforcementPublish)\**">
+        <Exclude Files="!(bindpath.EnforcementPublish)\**\*.pdb" />
+      </Files>
+    </Feature>
+  </Package>
+</Wix>

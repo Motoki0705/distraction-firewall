@@ -1,0 +1,296 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/Motoki0705/distraction-firewall/main/config/schemas/target-catalog.v1.schema.json",
+  "title": "Distraction Firewall target catalog, version 1",
+  "description": "A collection of generic target definitions. Version 1 ships only the YouTube production target.",
+  "type": "array",
+  "minItems": 1,
+  "maxItems": 64,
+  "uniqueItems": true,
+  "items": {
+    "$ref": "#/$defs/target_definition"
+  },
+  "$defs": {
+    "hostname": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 253,
+      "pattern": "^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$",
+      "$comment": "Hosts are normalized ASCII/IDNA A-labels: lowercase, no scheme, path, wildcard, or trailing dot."
+    },
+    "host_list": {
+      "type": "array",
+      "maxItems": 256,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/hostname"
+      }
+    },
+    "browser_url_pattern": {
+      "type": "string",
+      "minLength": 7,
+      "maxLength": 2048,
+      "pattern": "^(?:\\*|https?)://(?:\\*\\.)?(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?/[^\\s]*$",
+      "$comment": "Version 1 accepts an HTTP, HTTPS, or wildcard scheme; an optional left-most host wildcard; and a required path."
+    },
+    "disabled_ip_block_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode"
+      ],
+      "properties": {
+        "mode": {
+          "const": "disabled"
+        }
+      }
+    },
+    "dns_observed_ip_block_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "source_fields",
+        "address_families",
+        "transport_protocols",
+        "follow_cname_chain",
+        "max_observation_ttl_seconds",
+        "shared_address_action"
+      ],
+      "properties": {
+        "mode": {
+          "const": "dns_observed"
+        },
+        "source_fields": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "exact_hosts",
+              "suffix_hosts",
+              "cname_suffixes",
+              "seed_hosts"
+            ]
+          }
+        },
+        "address_families": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "ipv4",
+              "ipv6"
+            ]
+          }
+        },
+        "transport_protocols": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "tcp",
+              "udp"
+            ]
+          }
+        },
+        "follow_cname_chain": {
+          "type": "boolean"
+        },
+        "max_observation_ttl_seconds": {
+          "type": "integer",
+          "minimum": 60,
+          "maximum": 86400
+        },
+        "shared_address_action": {
+          "enum": [
+            "block",
+            "observe",
+            "dns_browser_only"
+          ]
+        }
+      }
+    },
+    "known_collateral_entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rule_field",
+        "rule_value",
+        "purpose",
+        "severity",
+        "risk",
+        "mitigation"
+      ],
+      "properties": {
+        "rule_field": {
+          "enum": [
+            "exact_hosts",
+            "suffix_hosts",
+            "cname_suffixes",
+            "seed_hosts",
+            "browser_url_patterns",
+            "ip_block_policy"
+          ]
+        },
+        "rule_value": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "purpose": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "\\S"
+        },
+        "severity": {
+          "enum": [
+            "low",
+            "medium",
+            "high"
+          ]
+        },
+        "risk": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "pattern": "\\S"
+        },
+        "mitigation": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "pattern": "\\S"
+        }
+      }
+    },
+    "target_definition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stable_id",
+        "display_name",
+        "catalog_version",
+        "exact_hosts",
+        "suffix_hosts",
+        "cname_suffixes",
+        "browser_url_patterns",
+        "ip_block_policy",
+        "known_collateral"
+      ],
+      "properties": {
+        "stable_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-z](?:[a-z0-9]|[._-](?=[a-z0-9]))*$"
+        },
+        "display_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "\\S"
+        },
+        "description": {
+          "type": "string",
+          "maxLength": 512
+        },
+        "catalog_version": {
+          "type": "string",
+          "maxLength": 64,
+          "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-(?:(?:0|[1-9][0-9]*)|(?:[0-9]*[A-Za-z-][0-9A-Za-z-]*))(?:\\.(?:(?:0|[1-9][0-9]*)|(?:[0-9]*[A-Za-z-][0-9A-Za-z-]*)))*)?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$"
+        },
+        "exact_hosts": {
+          "$ref": "#/$defs/host_list"
+        },
+        "suffix_hosts": {
+          "$ref": "#/$defs/host_list"
+        },
+        "cname_suffixes": {
+          "$ref": "#/$defs/host_list"
+        },
+        "seed_hosts": {
+          "$ref": "#/$defs/host_list"
+        },
+        "browser_url_patterns": {
+          "type": "array",
+          "maxItems": 512,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/browser_url_pattern"
+          }
+        },
+        "ip_block_policy": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/disabled_ip_block_policy"
+            },
+            {
+              "$ref": "#/$defs/dns_observed_ip_block_policy"
+            }
+          ]
+        },
+        "known_collateral": {
+          "type": "array",
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/known_collateral_entry"
+          }
+        },
+        "coverage": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "\\S"
+          }
+        }
+      },
+      "anyOf": [
+        {
+          "properties": {
+            "exact_hosts": {
+              "type": "array",
+              "minItems": 1
+            }
+          }
+        },
+        {
+          "properties": {
+            "suffix_hosts": {
+              "type": "array",
+              "minItems": 1
+            }
+          }
+        },
+        {
+          "properties": {
+            "cname_suffixes": {
+              "type": "array",
+              "minItems": 1
+            }
+          }
+        },
+        {
+          "properties": {
+            "browser_url_patterns": {
+              "type": "array",
+              "minItems": 1
+            }
+          }
+        }
+      ],
+      "$comment": "Runtime semantic validation also requires unique stable_id values, one catalog_version per file, seed_hosts covered by exact_hosts or suffix_hosts and paired with the seed_hosts source field, and known_collateral rule references that resolve after hostname normalization. These cross-item and cross-field constraints are not expressible in standard JSON Schema."
+    }
+  }
+}

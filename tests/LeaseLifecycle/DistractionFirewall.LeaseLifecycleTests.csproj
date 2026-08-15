@@ -1,0 +1,31 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows10.0.22000.0</TargetFramework>
+    <SupportedOSPlatformVersion>10.0.22000.0</SupportedOSPlatformVersion>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <NoWarn>$(NoWarn);CA1707</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="coverlet.collector" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\DistractionFirewall.ActivationService\DistractionFirewall.ActivationService.csproj" />
+    <ProjectReference Include="..\..\src\DistractionFirewall.Core\DistractionFirewall.Core.csproj" />
+    <ProjectReference Include="..\..\src\DistractionFirewall.Finalizer\DistractionFirewall.Finalizer.csproj" />
+    <ProjectReference Include="..\..\src\DistractionFirewall.LeaseWorker\DistractionFirewall.LeaseWorker.csproj" />
+    <ProjectReference Include="..\..\src\DistractionFirewall.Runtime.Windows\DistractionFirewall.Runtime.Windows.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,17 @@
+[
+  {
+    "stable_id": "invalid-browser-pattern",
+    "display_name": "Invalid browser pattern",
+    "catalog_version": "1.0.0",
+    "exact_hosts": [],
+    "suffix_hosts": [],
+    "cname_suffixes": [],
+    "browser_url_patterns": [
+      "ftp://video.example/*"
+    ],
+    "ip_block_policy": {
+      "mode": "disabled"
+    },
+    "known_collateral": []
+  }
+]

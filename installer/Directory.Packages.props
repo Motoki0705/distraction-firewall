@@ -1,0 +1,9 @@
+<Project>
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageVersion Include="WixToolset.BootstrapperApplications.wixext" Version="[5.0.2]" />
+    <PackageVersion Include="WixToolset.Util.wixext" Version="[5.0.2]" />
+  </ItemGroup>
+</Project>

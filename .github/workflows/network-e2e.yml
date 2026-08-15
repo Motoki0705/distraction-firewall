@@ -1,0 +1,42 @@
+name: Network E2E skeleton
+
+on:
+  workflow_dispatch:
+    inputs:
+      isolated_runner_ready:
+        description: Confirm that a disposable, isolated Windows runner is available
+        required: true
+        default: false
+        type: boolean
+
+permissions: {}
+
+jobs:
+  readiness-gate:
+    name: Network E2E / blocked until isolated harness exists
+    runs-on: windows-2025
+    timeout-minutes: 5
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Refuse destructive network testing
+        env:
+          ISOLATED_RUNNER_READY: ${{ inputs.isolated_runner_ready }}
+        run: |
+          @'
+          P1.5 readiness gate
+
+          This workflow intentionally performs no DNS, WFP, service, firewall,
+          lease, or uninstall mutation. A disposable Windows runner lifecycle,
+          rollback watchdog, connectivity recovery proof, and deferred active
+          uninstall oracle must exist before network E2E can run.
+
+          The confirmation input records operator intent but does not bypass the
+          missing harness. This job must not be treated as passing test evidence.
+          '@ >> $env:GITHUB_STEP_SUMMARY
+
+          if ($env:ISOLATED_RUNNER_READY -ne 'true') {
+            throw 'A disposable isolated Windows runner was not confirmed.'
+          }
+          throw 'Network E2E remains fail-closed: the isolated mutation and recovery harness is not implemented.'

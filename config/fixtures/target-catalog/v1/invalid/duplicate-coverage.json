@@ -1,0 +1,22 @@
+[
+  {
+    "stable_id": "duplicate-coverage",
+    "display_name": "Duplicate coverage",
+    "description": "Coverage entries are stable display metadata.",
+    "catalog_version": "1.0.0",
+    "exact_hosts": [
+      "coverage.example"
+    ],
+    "suffix_hosts": [],
+    "cname_suffixes": [],
+    "browser_url_patterns": [],
+    "ip_block_policy": {
+      "mode": "disabled"
+    },
+    "known_collateral": [],
+    "coverage": [
+      "Browser policy",
+      "Browser policy"
+    ]
+  }
+]

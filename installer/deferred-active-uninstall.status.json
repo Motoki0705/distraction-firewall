@@ -1,0 +1,7 @@
+{
+  "capability": "deferred-active-uninstall",
+  "implemented": false,
+  "requiredForStable": true,
+  "evidence": [],
+  "note": "This status covers automatic post-deadline Runtime/Bundle removal. Active Runtime removal refusal is authored, but destructive Windows 11 evidence is not recorded. REMOVE_AFTER_COMPLETION persistence, automatic removal, UNINSTALL_PENDING retry, and destructive VM evidence remain unimplemented."
+}

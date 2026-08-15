@@ -1,0 +1,17 @@
+[
+  {
+    "stable_id": "invalid-catalog-version",
+    "display_name": "Invalid catalog version",
+    "catalog_version": "01.0.0",
+    "exact_hosts": [
+      "version.example"
+    ],
+    "suffix_hosts": [],
+    "cname_suffixes": [],
+    "browser_url_patterns": [],
+    "ip_block_policy": {
+      "mode": "disabled"
+    },
+    "known_collateral": []
+  }
+]

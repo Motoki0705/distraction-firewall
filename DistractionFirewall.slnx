@@ -1,0 +1,37 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/DistractionFirewall.ActivationService/DistractionFirewall.ActivationService.csproj" />
+    <Project Path="src/DistractionFirewall.App/DistractionFirewall.App.csproj" />
+    <Project Path="src/DistractionFirewall.Cli/DistractionFirewall.Cli.csproj" />
+    <Project Path="src/DistractionFirewall.Contracts/DistractionFirewall.Contracts.csproj" />
+    <Project Path="src/DistractionFirewall.Core/DistractionFirewall.Core.csproj" />
+    <Project Path="src/DistractionFirewall.DnsFilter/DistractionFirewall.DnsFilter.csproj" />
+    <Project Path="src/DistractionFirewall.Enforcement.Windows/DistractionFirewall.Enforcement.Windows.csproj" />
+    <Project Path="src/DistractionFirewall.Finalizer/DistractionFirewall.Finalizer.csproj" />
+    <Project Path="src/DistractionFirewall.Ipc/DistractionFirewall.Ipc.csproj" />
+    <Project Path="src/DistractionFirewall.LeaseWorker/DistractionFirewall.LeaseWorker.csproj" />
+    <Project Path="src/DistractionFirewall.Runtime.Windows/DistractionFirewall.Runtime.Windows.csproj" />
+  </Folder>
+  <Folder Name="/tests/" />
+  <Folder Name="/tests/Architecture/">
+    <Project Path="tests/Architecture/DistractionFirewall.ArchitectureTests.csproj" />
+  </Folder>
+  <Folder Name="/tests/Contract/">
+    <Project Path="tests/Contract/DistractionFirewall.ContractTests.csproj" />
+  </Folder>
+  <Folder Name="/tests/Dns/">
+    <Project Path="tests/Dns/DistractionFirewall.DnsFilter.Tests.csproj" />
+  </Folder>
+  <Folder Name="/tests/Integration.Windows/">
+    <Project Path="tests/Integration.Windows/DistractionFirewall.Integration.Windows.Tests.csproj" />
+  </Folder>
+  <Folder Name="/tests/LeaseLifecycle/">
+    <Project Path="tests/LeaseLifecycle/DistractionFirewall.LeaseLifecycleTests.csproj" />
+  </Folder>
+  <Folder Name="/tests/UI/">
+    <Project Path="tests/UI/DistractionFirewall.UiTests.csproj" />
+  </Folder>
+  <Folder Name="/tests/Unit/">
+    <Project Path="tests/Unit/DistractionFirewall.UnitTests.csproj" />
+  </Folder>
+</Solution>

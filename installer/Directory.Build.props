@@ -1,0 +1,8 @@
+<Project>
+  <PropertyGroup>
+    <InstallerPlatform>x64</InstallerPlatform>
+    <DebugType>none</DebugType>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+    <DeferredActiveUninstallImplemented>false</DeferredActiveUninstallImplemented>
+  </PropertyGroup>
+</Project>

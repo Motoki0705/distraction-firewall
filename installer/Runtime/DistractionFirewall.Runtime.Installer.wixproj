@@ -1,0 +1,24 @@
+<Project Sdk="WixToolset.Sdk/5.0.2">
+  <PropertyGroup>
+    <MsiVersion Condition="'$(MsiVersion)' == ''">0.1.0</MsiVersion>
+    <PackageSemanticVersion Condition="'$(PackageSemanticVersion)' == ''">0.1.0-alpha.1</PackageSemanticVersion>
+    <OutputName Condition="'$(OutputName)' == ''">distraction-firewall-runtime-$(PackageSemanticVersion)-win-x64</OutputName>
+    <OutputPath Condition="'$(OutputPath)' == ''">$(MSBuildThisFileDirectory)..\..\artifacts\package\</OutputPath>
+    <ActivationServicePublishDir Condition="'$(ActivationServicePublishDir)' == ''">$(MSBuildThisFileDirectory)..\..\artifacts\publish\DistractionFirewall.ActivationService\win-x64</ActivationServicePublishDir>
+    <LeaseWorkerPublishDir Condition="'$(LeaseWorkerPublishDir)' == ''">$(MSBuildThisFileDirectory)..\..\artifacts\publish\DistractionFirewall.LeaseWorker\win-x64</LeaseWorkerPublishDir>
+    <DnsFilterPublishDir Condition="'$(DnsFilterPublishDir)' == ''">$(MSBuildThisFileDirectory)..\..\artifacts\publish\DistractionFirewall.DnsFilter\win-x64</DnsFilterPublishDir>
+    <FinalizerPublishDir Condition="'$(FinalizerPublishDir)' == ''">$(MSBuildThisFileDirectory)..\..\artifacts\publish\DistractionFirewall.Finalizer\win-x64</FinalizerPublishDir>
+    <EnforcementPublishDir Condition="'$(EnforcementPublishDir)' == ''">$(MSBuildThisFileDirectory)..\..\artifacts\publish\DistractionFirewall.Enforcement.Windows\win-x64</EnforcementPublishDir>
+    <DefineConstants>$(DefineConstants);MsiVersion=$(MsiVersion);PackageSemanticVersion=$(PackageSemanticVersion)</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <BindPath BindName="ActivationServicePublish" Include="$(ActivationServicePublishDir)" />
+    <BindPath BindName="LeaseWorkerPublish" Include="$(LeaseWorkerPublishDir)" />
+    <BindPath BindName="DnsFilterPublish" Include="$(DnsFilterPublishDir)" />
+    <BindPath BindName="FinalizerPublish" Include="$(FinalizerPublishDir)" />
+    <BindPath BindName="EnforcementPublish" Include="$(EnforcementPublishDir)" />
+    <BindPath BindName="InstallerFixtures" Include="$(MSBuildThisFileDirectory)fixtures" />
+    <PackageReference Include="WixToolset.Util.wixext" />
+  </ItemGroup>
+</Project>

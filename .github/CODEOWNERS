@@ -1,0 +1,12 @@
+* @Motoki0705
+
+# Security-sensitive automation and privileged components.
+/.github/ @Motoki0705
+/eng/ @Motoki0705
+/installer/ @Motoki0705
+/SECURITY.md @Motoki0705
+/src/DistractionFirewall.ActivationService/ @Motoki0705
+/src/DistractionFirewall.DnsFilter/ @Motoki0705
+/src/DistractionFirewall.Enforcement.Windows/ @Motoki0705
+/src/DistractionFirewall.Finalizer/ @Motoki0705
+/src/DistractionFirewall.LeaseWorker/ @Motoki0705

@@ -1,0 +1,27 @@
+# Build output
+bin/
+obj/
+artifacts/
+TestResults/
+
+# IDE and user state
+.vs/
+.vscode/
+*.user
+*.suo
+
+# Local tooling and secrets
+.tools/
+.env
+*.pfx
+*.snk
+
+# Packaging output
+installer/**/bin/
+installer/**/obj/
+*.msi
+*.msix
+
+# OS files
+Thumbs.db
+Desktop.ini

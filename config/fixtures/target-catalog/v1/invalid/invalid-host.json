@@ -1,0 +1,17 @@
+[
+  {
+    "stable_id": "invalid-host",
+    "display_name": "Invalid host",
+    "catalog_version": "1.0.0",
+    "exact_hosts": [],
+    "suffix_hosts": [
+      "*.video.example"
+    ],
+    "cname_suffixes": [],
+    "browser_url_patterns": [],
+    "ip_block_policy": {
+      "mode": "disabled"
+    },
+    "known_collateral": []
+  }
+]

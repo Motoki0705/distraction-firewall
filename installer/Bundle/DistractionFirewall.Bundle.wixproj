@@ -1,0 +1,17 @@
+<Project Sdk="WixToolset.Sdk/5.0.2">
+  <PropertyGroup>
+    <OutputType>Bundle</OutputType>
+    <PackageSemanticVersion Condition="'$(PackageSemanticVersion)' == ''">0.1.0-alpha.1</PackageSemanticVersion>
+    <OutputName Condition="'$(OutputName)' == ''">distraction-firewall-setup-$(PackageSemanticVersion)-win-x64</OutputName>
+    <OutputPath Condition="'$(OutputPath)' == ''">$(MSBuildThisFileDirectory)..\..\artifacts\package\</OutputPath>
+    <PackageOutputPath Condition="'$(PackageOutputPath)' == ''">$(OutputPath)</PackageOutputPath>
+    <AppMsiFileName Condition="'$(AppMsiFileName)' == ''">distraction-firewall-app-$(PackageSemanticVersion)-win-x64.msi</AppMsiFileName>
+    <RuntimeMsiFileName Condition="'$(RuntimeMsiFileName)' == ''">distraction-firewall-runtime-$(PackageSemanticVersion)-win-x64.msi</RuntimeMsiFileName>
+    <DefineConstants>$(DefineConstants);PackageSemanticVersion=$(PackageSemanticVersion);AppMsiFileName=$(AppMsiFileName);RuntimeMsiFileName=$(RuntimeMsiFileName)</DefineConstants>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <BindPath BindName="PackageOutput" Include="$(PackageOutputPath)" />
+    <PackageReference Include="WixToolset.BootstrapperApplications.wixext" />
+  </ItemGroup>
+</Project>

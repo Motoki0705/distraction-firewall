@@ -1,0 +1,32 @@
+<Wix
+  xmlns="http://wixtoolset.org/schemas/v4/wxs"
+  xmlns:bal="http://wixtoolset.org/schemas/v4/wxs/bal">
+  <Bundle
+    Name="Distraction Firewall"
+    Manufacturer="Motoki0705"
+    Version="$(PackageSemanticVersion)"
+    UpgradeCode="{9F89BB92-BF79-4127-A4F5-4A4A4FD88EE6}"
+    DisableModify="yes"
+    Compressed="yes">
+    <BootstrapperApplication>
+      <bal:WixStandardBootstrapperApplication
+        LicenseUrl=""
+        Theme="hyperlinkLicense"
+        ShowVersion="yes"
+        SuppressOptionsUI="yes" />
+    </BootstrapperApplication>
+
+    <Chain DisableRollback="yes">
+      <MsiPackage
+        Id="RuntimeMsi"
+        SourceFile="!(bindpath.PackageOutput)\$(RuntimeMsiFileName)"
+        Visible="no"
+        Vital="yes" />
+      <MsiPackage
+        Id="AppMsi"
+        SourceFile="!(bindpath.PackageOutput)\$(AppMsiFileName)"
+        Visible="yes"
+        Vital="yes" />
+    </Chain>
+  </Bundle>
+</Wix>

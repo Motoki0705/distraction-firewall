@@ -1,0 +1,30 @@
+[
+  {
+    "stable_id": "duplicate-policy-value",
+    "display_name": "Duplicate policy value",
+    "catalog_version": "1.0.0",
+    "exact_hosts": [
+      "policy.example"
+    ],
+    "suffix_hosts": [],
+    "cname_suffixes": [],
+    "browser_url_patterns": [],
+    "ip_block_policy": {
+      "mode": "dns_observed",
+      "source_fields": [
+        "exact_hosts",
+        "exact_hosts"
+      ],
+      "address_families": [
+        "ipv4"
+      ],
+      "transport_protocols": [
+        "tcp"
+      ],
+      "follow_cname_chain": false,
+      "max_observation_ttl_seconds": 60,
+      "shared_address_action": "observe"
+    },
+    "known_collateral": []
+  }
+]

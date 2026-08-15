@@ -1,0 +1,17 @@
+[
+  {
+    "stable_id": "invalid-prerelease-version",
+    "display_name": "Invalid prerelease version",
+    "catalog_version": "1.0.0-01",
+    "exact_hosts": [
+      "prerelease.example"
+    ],
+    "suffix_hosts": [],
+    "cname_suffixes": [],
+    "browser_url_patterns": [],
+    "ip_block_policy": {
+      "mode": "disabled"
+    },
+    "known_collateral": []
+  }
+]

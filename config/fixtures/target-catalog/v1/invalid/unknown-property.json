@@ -1,0 +1,18 @@
+[
+  {
+    "stable_id": "unknown-property",
+    "display_name": "Unknown property",
+    "catalog_version": "1.0.0",
+    "exact_hosts": [
+      "unknown.example"
+    ],
+    "suffix_hosts": [],
+    "cname_suffixes": [],
+    "browser_url_patterns": [],
+    "ip_block_policy": {
+      "mode": "disabled"
+    },
+    "known_collateral": [],
+    "cancel_url": "https://unknown.example/cancel"
+  }
+]

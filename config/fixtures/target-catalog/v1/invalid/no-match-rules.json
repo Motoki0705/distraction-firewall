@@ -1,0 +1,15 @@
+[
+  {
+    "stable_id": "no-match-rules",
+    "display_name": "No match rules",
+    "catalog_version": "1.0.0",
+    "exact_hosts": [],
+    "suffix_hosts": [],
+    "cname_suffixes": [],
+    "browser_url_patterns": [],
+    "ip_block_policy": {
+      "mode": "disabled"
+    },
+    "known_collateral": []
+  }
+]

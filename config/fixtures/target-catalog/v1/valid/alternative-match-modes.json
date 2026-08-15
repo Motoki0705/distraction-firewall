@@ -1,0 +1,67 @@
+[
+  {
+    "stable_id": "cname-only",
+    "display_name": "CNAME only",
+    "description": "Exercises a target attributed only by canonical-name suffix.",
+    "catalog_version": "1.3.0",
+    "exact_hosts": [],
+    "suffix_hosts": [],
+    "cname_suffixes": [
+      "edge.cname.example"
+    ],
+    "browser_url_patterns": [],
+    "ip_block_policy": {
+      "mode": "disabled"
+    },
+    "known_collateral": [],
+    "coverage": [
+      "DNS CNAME attribution"
+    ]
+  },
+  {
+    "stable_id": "browser-only",
+    "display_name": "Browser only",
+    "description": "Exercises a path-scoped browser-only target.",
+    "catalog_version": "1.3.0",
+    "exact_hosts": [],
+    "suffix_hosts": [],
+    "cname_suffixes": [],
+    "browser_url_patterns": [
+      "*://shared.example/video/*"
+    ],
+    "ip_block_policy": {
+      "mode": "disabled"
+    },
+    "known_collateral": [],
+    "coverage": [
+      "Browser policy"
+    ]
+  },
+  {
+    "stable_id": "minimum-observation-ttl",
+    "display_name": "Minimum observation TTL",
+    "catalog_version": "1.3.0",
+    "exact_hosts": [
+      "ttl.example"
+    ],
+    "suffix_hosts": [],
+    "cname_suffixes": [],
+    "browser_url_patterns": [],
+    "ip_block_policy": {
+      "mode": "dns_observed",
+      "source_fields": [
+        "exact_hosts"
+      ],
+      "address_families": [
+        "ipv4"
+      ],
+      "transport_protocols": [
+        "tcp"
+      ],
+      "follow_cname_chain": false,
+      "max_observation_ttl_seconds": 60,
+      "shared_address_action": "dns_browser_only"
+    },
+    "known_collateral": []
+  }
+]

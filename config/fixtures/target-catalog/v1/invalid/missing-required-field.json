@@ -1,0 +1,16 @@
+[
+  {
+    "stable_id": "missing-collateral",
+    "display_name": "Missing collateral",
+    "catalog_version": "1.0.0",
+    "exact_hosts": [
+      "missing.example"
+    ],
+    "suffix_hosts": [],
+    "cname_suffixes": [],
+    "browser_url_patterns": [],
+    "ip_block_policy": {
+      "mode": "disabled"
+    }
+  }
+]

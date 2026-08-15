@@ -1,0 +1,49 @@
+[
+  {
+    "stable_id": "sample-video",
+    "display_name": "Sample Video",
+    "catalog_version": "1.2.3",
+    "exact_hosts": [
+      "api.video.example"
+    ],
+    "suffix_hosts": [
+      "video.example"
+    ],
+    "cname_suffixes": [
+      "edge.video.example"
+    ],
+    "browser_url_patterns": [
+      "*://video.example/*",
+      "*://*.video.example/*"
+    ],
+    "ip_block_policy": {
+      "mode": "dns_observed",
+      "source_fields": [
+        "exact_hosts",
+        "suffix_hosts",
+        "cname_suffixes"
+      ],
+      "address_families": [
+        "ipv4",
+        "ipv6"
+      ],
+      "transport_protocols": [
+        "tcp",
+        "udp"
+      ],
+      "follow_cname_chain": true,
+      "max_observation_ttl_seconds": 300,
+      "shared_address_action": "observe"
+    },
+    "known_collateral": [
+      {
+        "rule_field": "suffix_hosts",
+        "rule_value": "video.example",
+        "purpose": "Exercise a generic suffix target",
+        "severity": "low",
+        "risk": "Synthetic fixture subdomains are included in the match.",
+        "mitigation": "Use this reserved example domain only in deterministic tests."
+      }
+    ]
+  }
+]
