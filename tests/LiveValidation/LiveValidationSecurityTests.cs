@@ -203,6 +203,9 @@ public sealed class LiveValidationSecurityTests
         Assert.True(
             recovery.IndexOf("Assert-RecoveryMachinePreflight", StringComparison.Ordinal) <
             recovery.IndexOf("Invoke-InstallerProcess $msiexec", StringComparison.Ordinal));
+        Assert.True(
+            recovery.IndexOf("Assert-AppAbsent", StringComparison.Ordinal) <
+            recovery.IndexOf("Invoke-InstallerProcess $msiexec", StringComparison.Ordinal));
         foreach (var required in new[]
                  {
                      "Get-BundleRegistration", "Test-DependencyProvider", "Get-ProductState", "Get-RelatedProducts",
@@ -219,6 +222,7 @@ public sealed class LiveValidationSecurityTests
 
         const string script = """
             $ErrorActionPreference = 'Stop'
+            Set-StrictMode -Version Latest
             $templatePath = [IO.Path]::Combine($env:LIVE_VALIDATION_REPOSITORY_ROOT, 'eng', 'live-validation', 'templates', 'Invoke-ElevatedPhase.ps1.template')
             $tokens = $null
             $errors = $null
@@ -293,6 +297,183 @@ public sealed class LiveValidationSecurityTests
         var result = RunWindowsPowerShell(script);
         Assert.Equal(0, result.ExitCode);
         Assert.Contains("recovery-preflight-order=passed", result.StandardOutput, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Elevated_template_never_reads_Count_directly_from_a_command_pipeline()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string script = """
+            $ErrorActionPreference = 'Stop'
+            Set-StrictMode -Version Latest
+            function Find-DirectPipelineCount {
+              param([Parameter(Mandatory)][Management.Automation.Language.Ast]$Root)
+              return @($Root.FindAll({
+                param($node)
+                if ($node -isnot [Management.Automation.Language.MemberExpressionAst]) { return $false }
+                if ($node.Member -isnot [Management.Automation.Language.StringConstantExpressionAst] -or $node.Member.Value -cne 'Count') { return $false }
+                if ($node.Expression -isnot [Management.Automation.Language.ParenExpressionAst]) { return $false }
+                return @($node.Expression.Pipeline.PipelineElements | Where-Object { $_ -is [Management.Automation.Language.CommandAst] }).Count -gt 0
+              }, $true))
+            }
+            function Parse-Fixture {
+              param([Parameter(Mandatory)][string]$Text)
+              $tokens = $null
+              $errors = $null
+              $parsed = [Management.Automation.Language.Parser]::ParseInput($Text, [ref]$tokens, [ref]$errors)
+              if ($errors.Count -ne 0) { throw ($errors.Message -join '; ') }
+              return $parsed
+            }
+            $templatePath = [IO.Path]::Combine($env:LIVE_VALIDATION_REPOSITORY_ROOT, 'eng', 'live-validation', 'templates', 'Invoke-ElevatedPhase.ps1.template')
+            $tokens = $null
+            $errors = $null
+            $templateAst = [Management.Automation.Language.Parser]::ParseFile($templatePath, [ref]$tokens, [ref]$errors)
+            if ($errors.Count -ne 0) { throw ($errors.Message -join '; ') }
+            $unsafe = @(Find-DirectPipelineCount $templateAst)
+            if ($unsafe.Count -ne 0) { throw "Direct pipeline Count access remains: $($unsafe.Extent.Text -join '; ')" }
+            if (@(Find-DirectPipelineCount (Parse-Fixture '(Get-FixtureValue).Count')).Count -ne 1) { throw 'The direct-pipeline detector missed its unsafe fixture.' }
+            if (@(Find-DirectPipelineCount (Parse-Fixture '@(Get-FixtureValue).Count')).Count -ne 0) { throw 'The direct-pipeline detector rejected array materialization.' }
+            'direct-pipeline-count=passed'
+            """;
+
+        var result = RunWindowsPowerShell(script);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Contains("direct-pipeline-count=passed", result.StandardOutput, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Absent_product_family_checks_handle_empty_single_and_multiple_outputs_under_windows_powershell_5_1_strict_mode()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string script = """
+            $ErrorActionPreference = 'Stop'
+            Set-StrictMode -Version Latest
+            $templatePath = [IO.Path]::Combine($env:LIVE_VALIDATION_REPOSITORY_ROOT, 'eng', 'live-validation', 'templates', 'Invoke-ElevatedPhase.ps1.template')
+            $tokens = $null
+            $errors = $null
+            $ast = [Management.Automation.Language.Parser]::ParseFile($templatePath, [ref]$tokens, [ref]$errors)
+            if ($errors.Count -ne 0) { throw ($errors.Message -join '; ') }
+            foreach ($name in @('Assert-Condition', 'Assert-RuntimeAbsent', 'Assert-AppAbsent')) {
+              $functionAst = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name }, $true)
+              if ($null -eq $functionAst) { throw "Missing function: $name" }
+              . ([ScriptBlock]::Create($functionAst.Extent.Text))
+            }
+            $campaign = [pscustomobject]@{
+              fixed = [pscustomobject]@{ RuntimeUpgradeCode = 'runtime-upgrade'; AppUpgradeCode = 'app-upgrade' }
+              paths = [pscustomobject]@{ runtime_root = 'runtime-root'; runtime_data_root = 'runtime-data'; runtime_seed_key = 'runtime-seed'; app_root = 'app-root' }
+            }
+            $serviceName = 'fixture-service'
+            function Get-Service { return $null }
+            function Test-Path { return $false }
+            function Get-RelatedProducts {
+              switch ($script:fixtureResultCount) {
+                0 { return @() }
+                1 { return 'product-one' }
+                default { return 'product-one', 'product-two', 'product-three' }
+              }
+            }
+            $checks = @(
+              [pscustomobject]@{ name = 'Assert-AppAbsent'; error = 'An App MSI remains in the fixed UpgradeCode family.' },
+              [pscustomobject]@{ name = 'Assert-RuntimeAbsent'; error = 'A Runtime MSI remains in the fixed UpgradeCode family.' }
+            )
+            foreach ($check in $checks) {
+              foreach ($count in @(0, 1, 3)) {
+                $script:fixtureResultCount = $count
+                try {
+                  & $check.name
+                  if ($count -ne 0) { throw "fixture-$($check.name)-$count-unexpectedly-passed" }
+                }
+                catch {
+                  if ($count -eq 0) { throw }
+                  if ($_.FullyQualifiedErrorId -match 'PropertyNotFoundStrict') { throw "fixture-$($check.name)-$count-used-scalar-Count" }
+                  if ($_.Exception.Message -cne $check.error) { throw }
+                }
+              }
+            }
+            'strict-result-cardinality=passed'
+            """;
+
+        var result = RunWindowsPowerShell(script);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Contains("strict-result-cardinality=passed", result.StandardOutput, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Fatal_diagnostic_preserves_the_bounded_campaign_body_error_when_postflight_also_throws()
+    {
+        var child = ReadLiveValidationFile("templates", "Invoke-ElevatedPhase.ps1.template");
+        Assert.True(
+            child.IndexOf("$script:campaignError = $null", StringComparison.Ordinal) <
+            child.IndexOf("$windowsDirectory =", StringComparison.Ordinal),
+            "campaignError must be initialized before the first operation that can throw.");
+        Assert.Contains("secondary_error = $fatalSecondaryError", child, StringComparison.Ordinal);
+
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var fixtureRoot = Path.Combine(Path.GetTempPath(), $"df-fatal-diagnostic-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(fixtureRoot);
+        try
+        {
+            const string script = """
+                $ErrorActionPreference = 'Stop'
+                $templatePath = [IO.Path]::Combine($env:LIVE_VALIDATION_REPOSITORY_ROOT, 'eng', 'live-validation', 'templates', 'Invoke-ElevatedPhase.ps1.template')
+                $tokens = $null
+                $errors = $null
+                $ast = [Management.Automation.Language.Parser]::ParseFile($templatePath, [ref]$tokens, [ref]$errors)
+                if ($errors.Count -ne 0) { throw ($errors.Message -join '; ') }
+                $parts = [Collections.Generic.List[string]]::new()
+                $parts.Add('Set-StrictMode -Version Latest')
+                foreach ($name in @('ConvertTo-BoundedDiagnosticText', 'Write-NewJson')) {
+                  $functionAst = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name }, $true)
+                  if ($null -eq $functionAst) { throw "Missing function: $name" }
+                  $parts.Add($functionAst.Extent.Text)
+                }
+                $trapAst = $ast.Find({ param($node) $node -is [Management.Automation.Language.TrapStatementAst] }, $true)
+                if ($null -eq $trapAst) { throw 'Missing top-level trap.' }
+                $parts.Add('$script:stageCreatedByCampaign = $false')
+                $parts.Add('$script:campaignError = ''campaign-body-sentinel''')
+                $parts.Add('$returnedEvidenceRoot = $env:LIVE_VALIDATION_FATAL_FIXTURE_ROOT')
+                $parts.Add('$campaign = [pscustomobject]@{ campaign_id = ''fatal-fixture'' }')
+                $parts.Add($trapAst.Extent.Text)
+                $parts.Add("throw ('postflight-sentinel-' + ('x' * 4096))")
+                & ([ScriptBlock]::Create(($parts -join "`r`n")))
+                """;
+
+            var result = RunWindowsPowerShell(
+                script,
+                new Dictionary<string, string?> { ["LIVE_VALIDATION_FATAL_FIXTURE_ROOT"] = fixtureRoot });
+
+            Assert.Equal(1, result.ExitCode);
+            Assert.DoesNotContain("VariableIsUndefined", result.StandardOutput + result.StandardError, StringComparison.Ordinal);
+            var fatalPath = Path.Combine(fixtureRoot, "fatal-error.json");
+            Assert.True(File.Exists(fatalPath), $"Fatal evidence was not written. stdout={result.StandardOutput}; stderr={result.StandardError}");
+            using var fatal = JsonDocument.Parse(File.ReadAllText(fatalPath));
+            var root = fatal.RootElement;
+            Assert.Equal("campaign-body-sentinel", root.GetProperty("error").GetString());
+            var secondary = root.GetProperty("secondary_error").GetString();
+            Assert.NotNull(secondary);
+            Assert.Equal(2048, secondary.Length);
+            Assert.StartsWith("postflight-sentinel-", secondary, StringComparison.Ordinal);
+            Assert.EndsWith("... [truncated]", secondary, StringComparison.Ordinal);
+            Assert.Equal(JsonValueKind.Null, root.GetProperty("protected_stage_teardown_error").ValueKind);
+        }
+        finally
+        {
+            Directory.Delete(fixtureRoot, recursive: true);
+        }
     }
 
     [Fact]
@@ -419,16 +600,21 @@ public sealed class LiveValidationSecurityTests
         var child = ReadLiveValidationFile("templates", "Invoke-ElevatedPhase.ps1.template");
         Assert.Contains("$script:installerRoot = [IO.Path]::Combine($windowsDirectory, 'Installer')", child, StringComparison.Ordinal);
         Assert.Contains("$script:stageCreatedByCampaign = $false", child, StringComparison.Ordinal);
+        Assert.Contains("$script:campaignError = $null", child, StringComparison.Ordinal);
         Assert.Contains("[IO.Path]::GetFullPath($script:installerRoot)", child, StringComparison.Ordinal);
         Assert.Contains("if ($script:stageCreatedByCampaign)", child, StringComparison.Ordinal);
         Assert.DoesNotContain("\n$installerRoot = [IO.Path]::Combine($windowsDirectory, 'Installer')", child, StringComparison.Ordinal);
         Assert.DoesNotContain("\n$stageCreatedByCampaign = $false", child, StringComparison.Ordinal);
         var strictMode = child.IndexOf("Set-StrictMode -Version Latest", StringComparison.Ordinal);
         var stageInitializer = child.IndexOf("$script:stageCreatedByCampaign = $false", StringComparison.Ordinal);
+        var campaignErrorInitializer = child.IndexOf("$script:campaignError = $null", StringComparison.Ordinal);
         var firstThrow = child.IndexOf("throw ", strictMode, StringComparison.Ordinal);
         Assert.True(
             strictMode >= 0 && stageInitializer > strictMode && stageInitializer < firstThrow,
             "Trap state must be initialized immediately after StrictMode and before the first throwable operation.");
+        Assert.True(
+            campaignErrorInitializer > strictMode && campaignErrorInitializer < firstThrow,
+            "Campaign error state must be initialized before the first throwable operation.");
 
         if (!OperatingSystem.IsWindows())
         {
@@ -493,11 +679,23 @@ public sealed class LiveValidationSecurityTests
               $node -is [Management.Automation.Language.AssignmentStatementAst] -and
                 $node.Extent.Text -ceq '$script:stageCreatedByCampaign = $false'
             }, $true)
+            $campaignErrorInit = $ast.Find({
+              param($node)
+              $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+                $node.Extent.Text -ceq '$script:campaignError = $null'
+            }, $true)
+            $boundedDiagnostic = $ast.Find({
+              param($node)
+              $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -ceq 'ConvertTo-BoundedDiagnosticText'
+            }, $true)
             $trapAst = $ast.Find({ param($node) $node -is [Management.Automation.Language.TrapStatementAst] }, $true)
-            if ($null -eq $stageInit -or $null -eq $trapAst) { throw 'Early-fatal fixture could not find the initializer or trap.' }
+            if ($null -eq $stageInit -or $null -eq $campaignErrorInit -or $null -eq $boundedDiagnostic -or $null -eq $trapAst) { throw 'Early-fatal fixture could not find the initializers, diagnostic helper, or trap.' }
             $memoryText = @"
             Set-StrictMode -Version Latest
+            $($boundedDiagnostic.Extent.Text)
             $($stageInit.Extent.Text)
+            $($campaignErrorInit.Extent.Text)
             $($trapAst.Extent.Text)
             throw 'deliberate-early-fatal'
             "@
