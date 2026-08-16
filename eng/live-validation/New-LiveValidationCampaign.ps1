@@ -354,6 +354,109 @@ function Assert-TrustedGitHubCliPathAcl {
     }
 }
 
+function ConvertTo-WindowsCommandLineArgument {
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Argument)
+
+    if ($Argument.Length -gt 0 -and $Argument -cnotmatch '[\s"]') { return $Argument }
+
+    $builder = [Text.StringBuilder]::new()
+    $null = $builder.Append('"')
+    $backslashCount = 0
+    foreach ($character in $Argument.ToCharArray()) {
+        if ($character -eq '\') {
+            $backslashCount++
+            continue
+        }
+        if ($character -eq '"') {
+            if ($backslashCount -gt 0) { $null = $builder.Append(('\' * ($backslashCount * 2))) }
+            $null = $builder.Append('\"')
+            $backslashCount = 0
+            continue
+        }
+        if ($backslashCount -gt 0) {
+            $null = $builder.Append(('\' * $backslashCount))
+            $backslashCount = 0
+        }
+        $null = $builder.Append($character)
+    }
+    if ($backslashCount -gt 0) { $null = $builder.Append(('\' * ($backslashCount * 2))) }
+    $null = $builder.Append('"')
+    return $builder.ToString()
+}
+
+function ConvertFrom-CapturedProcessText {
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Text)
+
+    if ([string]::IsNullOrEmpty($Text)) { return }
+    $lines = [Text.RegularExpressions.Regex]::Split($Text, '\r\n|\n|\r')
+    $lineCount = $lines.Length
+    if ($lineCount -gt 0 -and $lines[$lineCount - 1] -ceq '') { $lineCount-- }
+    for ($index = 0; $index -lt $lineCount; $index++) { [string]$lines[$index] }
+}
+
+function Protect-GitHubCliDiagnosticText {
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Text,
+        [AllowEmptyString()][string]$SensitiveValue,
+        [ValidateRange(32, 4096)][int]$MaximumLength = 2048
+    )
+
+    $protectedText = $Text
+    if (-not [string]::IsNullOrEmpty($SensitiveValue)) {
+        $protectedText = $protectedText.Replace($SensitiveValue, '[REDACTED]')
+    }
+    $suffix = '...[truncated]'
+    if ($protectedText.Length -gt $MaximumLength) {
+        $protectedText = $protectedText.Substring(0, $MaximumLength - $suffix.Length) + $suffix
+    }
+    return $protectedText
+}
+
+function Invoke-CapturedNativeProcess {
+    param(
+        [Parameter(Mandatory)][string]$FilePath,
+        [Parameter(Mandatory)][string[]]$Arguments,
+        [ValidateRange(1000, 300000)][int]$TimeoutMilliseconds = 120000
+    )
+
+    $encodedArguments = @()
+    foreach ($argument in $Arguments) { $encodedArguments += ConvertTo-WindowsCommandLineArgument ([string]$argument) }
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = [IO.Path]::GetFullPath($FilePath)
+    $startInfo.Arguments = $encodedArguments -join ' '
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $utf8NoBom = [Text.UTF8Encoding]::new($false)
+    $startInfo.StandardOutputEncoding = $utf8NoBom
+    $startInfo.StandardErrorEncoding = $utf8NoBom
+
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    try {
+        Assert-Condition ($process.Start()) "Trusted native process did not start: $FilePath"
+        $standardOutputTask = $process.StandardOutput.ReadToEndAsync()
+        $standardErrorTask = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit($TimeoutMilliseconds)) {
+            try { $process.Kill() }
+            catch { throw "Trusted native process exceeded its timeout and could not be terminated: $FilePath" }
+            Assert-Condition ($process.WaitForExit(10000)) "Trusted native process did not terminate after its timeout: $FilePath"
+            $null = $standardOutputTask.GetAwaiter().GetResult()
+            $null = $standardErrorTask.GetAwaiter().GetResult()
+            throw "Trusted native process exceeded its $TimeoutMilliseconds ms timeout: $FilePath"
+        }
+        $standardOutput = $standardOutputTask.GetAwaiter().GetResult()
+        $standardError = $standardErrorTask.GetAwaiter().GetResult()
+        return [pscustomobject][ordered]@{
+            exit_code = [int]$process.ExitCode
+            output = @(ConvertFrom-CapturedProcessText $standardOutput)
+            error = @(ConvertFrom-CapturedProcessText $standardError)
+        }
+    }
+    finally { $process.Dispose() }
+}
+
 function Resolve-TrustedGitHubCli {
     $programFilesValue = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)
     Assert-Condition (-not [string]::IsNullOrWhiteSpace($programFilesValue)) 'Native Program Files could not be resolved.'
@@ -373,8 +476,8 @@ function Resolve-TrustedGitHubCli {
     $expectedSubject = 'CN="GitHub, Inc.", O="GitHub, Inc.", L=San Francisco, S=California, C=US'
     Assert-Condition ($signature.Status.ToString() -ceq 'Valid' -and $null -ne $signature.SignerCertificate) 'GitHub CLI Authenticode signature is not valid.'
     Assert-Condition ([string]$signature.SignerCertificate.Subject -ceq $expectedSubject) 'GitHub CLI publisher is not GitHub, Inc.'
-    $versionOutput = @(& $cliPath --version 2>&1)
-    Assert-Condition ($LASTEXITCODE -eq 0 -and $versionOutput.Count -ge 1 -and [string]$versionOutput[0] -cmatch '^gh version ([0-9]+\.[0-9]+\.[0-9]+) \(') 'GitHub CLI version output is malformed.'
+    $versionCall = Invoke-CapturedNativeProcess -FilePath $cliPath -Arguments @('--version')
+    Assert-Condition ($versionCall.exit_code -eq 0 -and $versionCall.output.Count -ge 1 -and [string]$versionCall.output[0] -cmatch '^gh version ([0-9]+\.[0-9]+\.[0-9]+) \(') 'GitHub CLI version output is malformed.'
     $version = $Matches[1]
     $item = Get-Item -LiteralPath $cliPath -Force
     return [pscustomobject][ordered]@{
@@ -428,7 +531,7 @@ function Invoke-TrustedGitHubCli {
         $env:XDG_CONFIG_HOME = $null
         $env:GH_PAGER = $null
         $env:PAGER = $null
-        $env:GH_FORCE_TTY = '0'
+        $env:GH_FORCE_TTY = $null
         $env:GH_PROMPT_DISABLED = '1'
         $env:GH_DEBUG = $null
         $env:GH_BROWSER = $null
@@ -441,8 +544,25 @@ function Invoke-TrustedGitHubCli {
         $env:GH_NO_UPDATE_NOTIFIER = '1'
         $env:NO_COLOR = '1'
         $env:CLICOLOR = '0'
-        $output = @(& $TrustedGitHubCli.path @Arguments 2>&1)
-        return [pscustomobject][ordered]@{ exit_code = [int]$LASTEXITCODE; output = @($output) }
+        $nativeCall = Invoke-CapturedNativeProcess -FilePath $TrustedGitHubCli.path -Arguments $Arguments
+        if ($nativeCall.exit_code -eq 0) {
+            return [pscustomobject][ordered]@{
+                exit_code = $nativeCall.exit_code
+                output = @($nativeCall.output)
+                error = @($nativeCall.error)
+                diagnostic = ''
+            }
+        }
+
+        [string]$safeOutput = Protect-GitHubCliDiagnosticText -Text (@($nativeCall.output) -join [Environment]::NewLine) -SensitiveValue $Token
+        [string]$safeError = Protect-GitHubCliDiagnosticText -Text (@($nativeCall.error) -join [Environment]::NewLine) -SensitiveValue $Token
+        $diagnostic = Protect-GitHubCliDiagnosticText -Text "stdout: $safeOutput$([Environment]::NewLine)stderr: $safeError" -SensitiveValue $Token -MaximumLength 4096
+        return [pscustomobject][ordered]@{
+            exit_code = $nativeCall.exit_code
+            output = @(ConvertFrom-CapturedProcessText $safeOutput)
+            error = @(ConvertFrom-CapturedProcessText $safeError)
+            diagnostic = $diagnostic
+        }
     }
     finally {
         foreach ($name in $scopedNames) { [Environment]::SetEnvironmentVariable($name, $saved[$name], 'Process') }
@@ -821,7 +941,7 @@ foreach ($subjectPath in $expectedSubjectPaths) {
         '--source-ref', 'refs/heads/main',
         '--deny-self-hosted-runners'
     ) -Token $trustedGitHubToken
-    Assert-Condition ($attestationCall.exit_code -eq 0) "GitHub provenance verification failed for $([IO.Path]::GetFileName($subjectPath)): $(@($attestationCall.output) -join ' ')"
+    Assert-Condition ($attestationCall.exit_code -eq 0) "GitHub provenance verification failed for $([IO.Path]::GetFileName($subjectPath)): $($attestationCall.diagnostic)"
 }
 
 $resolvedRecovery = $null

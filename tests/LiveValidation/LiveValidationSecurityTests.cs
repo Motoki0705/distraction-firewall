@@ -660,18 +660,164 @@ public sealed class LiveValidationSecurityTests
             Assert.Contains("$env:GH_CONFIG_DIR = $configDirectory", source, StringComparison.Ordinal);
             Assert.Contains("distraction-firewall-gh-", source, StringComparison.Ordinal);
             Assert.Contains("$env:XDG_CONFIG_HOME = $null", source, StringComparison.Ordinal);
+            Assert.Contains("$env:GH_FORCE_TTY = $null", source, StringComparison.Ordinal);
+            Assert.DoesNotContain("$env:GH_FORCE_TTY = '0'", source, StringComparison.Ordinal);
             Assert.Contains("$env:GH_PROMPT_DISABLED = '1'", source, StringComparison.Ordinal);
             Assert.Contains("$env:GH_NO_UPDATE_NOTIFIER = '1'", source, StringComparison.Ordinal);
             Assert.Contains("[IO.Directory]::Delete($isolatedConfigDirectory, $true)", source, StringComparison.Ordinal);
             Assert.Contains("[Environment]::SetEnvironmentVariable($name, $saved[$name], 'Process')", source, StringComparison.Ordinal);
+            Assert.Contains("[Diagnostics.ProcessStartInfo]::new()", source, StringComparison.Ordinal);
+            Assert.Contains("$startInfo.UseShellExecute = $false", source, StringComparison.Ordinal);
+            Assert.Contains("$startInfo.RedirectStandardOutput = $true", source, StringComparison.Ordinal);
+            Assert.Contains("$startInfo.RedirectStandardError = $true", source, StringComparison.Ordinal);
+            Assert.Contains("$process.StandardOutput.ReadToEndAsync()", source, StringComparison.Ordinal);
+            Assert.Contains("$process.StandardError.ReadToEndAsync()", source, StringComparison.Ordinal);
+            Assert.Contains("$process.WaitForExit($TimeoutMilliseconds)", source, StringComparison.Ordinal);
+            Assert.Contains("$process.Kill()", source, StringComparison.Ordinal);
+            Assert.Contains("$process.WaitForExit(10000)", source, StringComparison.Ordinal);
+            Assert.Contains("Protect-GitHubCliDiagnosticText", source, StringComparison.Ordinal);
+            Assert.Contains("-SensitiveValue $Token -MaximumLength 4096", source, StringComparison.Ordinal);
+            Assert.Contains("Invoke-CapturedNativeProcess -FilePath $TrustedGitHubCli.path -Arguments $Arguments", source, StringComparison.Ordinal);
+            Assert.Contains("Invoke-CapturedNativeProcess -FilePath $cliPath -Arguments @('--version')", source, StringComparison.Ordinal);
+            Assert.DoesNotContain("2>&1", source, StringComparison.Ordinal);
+            Assert.DoesNotContain("& $TrustedGitHubCli.path", source, StringComparison.Ordinal);
             Assert.DoesNotContain("Get-Command 'gh", source, StringComparison.OrdinalIgnoreCase);
+
+            var processBoundary = ExtractBetween(source, "function Invoke-CapturedNativeProcess", "function Resolve-TrustedGitHubCli");
+            Assert.DoesNotContain("$Token", processBoundary, StringComparison.Ordinal);
         }
 
         Assert.Contains("'auth', 'token', '--hostname', 'github.com') -UseUserAuthenticationConfig", downloader, StringComparison.Ordinal);
         Assert.Contains("'api', '--hostname', 'github.com'", generator, StringComparison.Ordinal);
         Assert.Contains("-Token $trustedGitHubToken", generator, StringComparison.Ordinal);
+        Assert.Contains("$attestationCall.diagnostic", generator, StringComparison.Ordinal);
         Assert.Contains("tooling =", generator, StringComparison.Ordinal);
         Assert.Contains("github_cli = $trustedGitHubCli", generator, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Trusted_GitHub_CLI_capture_accepts_success_stderr_and_round_trips_Windows_arguments()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var fixtureRoot = Path.Combine(Path.GetTempPath(), $"df-gh-stderr-{Guid.NewGuid():N}");
+        var fixtureScript = Path.Combine(fixtureRoot, "emit-success-stderr.ps1");
+        Directory.CreateDirectory(fixtureRoot);
+        File.WriteAllText(
+            fixtureScript,
+            """
+            $ErrorActionPreference = 'Stop'
+            if ($null -ne $env:GH_FORCE_TTY) {
+              [Console]::Error.WriteLine('GH_FORCE_TTY leaked into the child process')
+              exit 9
+            }
+            if ($args.Count -gt 0 -and $args[0] -ceq '__failure__') {
+              [Console]::Out.WriteLine("failure stdout token=$env:GH_TOKEN " + ('o' * 8192))
+              [Console]::Error.WriteLine("failure stderr token=$env:GH_TOKEN " + ('e' * 8192))
+              exit 23
+            }
+            if ($args.Count -gt 0 -and $args[0] -ceq '__large__') {
+              [Console]::Out.WriteLine('o' * 131072)
+              [Console]::Error.WriteLine('e' * 131072)
+              exit 0
+            }
+            foreach ($value in $args) {
+              [Console]::Out.WriteLine([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$value)))
+            }
+            [Console]::Error.WriteLine('Loaded digest fixture')
+            exit 0
+            """,
+            new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+
+        const string script = """
+            $ErrorActionPreference = 'Stop'
+            $expected = @(
+              'plain',
+              'value with spaces',
+              'quote"inside',
+              'C:\folder with spaces\',
+              'two\\before"quote'
+            )
+            $nativePowerShell = [IO.Path]::Combine(
+              [Environment]::GetFolderPath([Environment+SpecialFolder]::System),
+              'WindowsPowerShell',
+              'v1.0',
+              'powershell.exe')
+            $nativeArguments = @(
+              '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+              '-File', $env:LIVE_VALIDATION_STDERR_FIXTURE
+            ) + $expected
+
+            foreach ($sourceName in @('Get-BuildOnceCandidate.ps1', 'New-LiveValidationCampaign.ps1')) {
+              $sourcePath = [IO.Path]::Combine($env:LIVE_VALIDATION_REPOSITORY_ROOT, 'eng', 'live-validation', $sourceName)
+              $tokens = $null
+              $errors = $null
+              $ast = [Management.Automation.Language.Parser]::ParseFile($sourcePath, [ref]$tokens, [ref]$errors)
+              if ($errors.Count -ne 0) { throw ($errors.Message -join '; ') }
+              foreach ($name in @(
+                'Assert-Condition',
+                'ConvertTo-WindowsCommandLineArgument',
+                'ConvertFrom-CapturedProcessText',
+                'Protect-GitHubCliDiagnosticText',
+                'Invoke-CapturedNativeProcess',
+                'Invoke-TrustedGitHubCli'
+              )) {
+                $functionAst = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name }, $true)
+                if ($null -eq $functionAst) { throw "Function not found in ${sourceName}: $name" }
+                . ([ScriptBlock]::Create($functionAst.Extent.Text))
+              }
+
+              $trustedFixture = [pscustomobject]@{ path = $nativePowerShell }
+              $call = Invoke-TrustedGitHubCli -TrustedGitHubCli $trustedFixture -Arguments $nativeArguments -Token 'fixture-token-not-for-output'
+              if ($call.exit_code -ne 0) { throw "Captured process failed for ${sourceName}: $(@($call.error) -join ' ')" }
+              if (@($call.error).Count -ne 1 -or [string]$call.error[0] -cne 'Loaded digest fixture') { throw "Success stderr was not captured separately for ${sourceName}." }
+              if (@($call.output).Count -ne $expected.Count) { throw "Argument result count mismatch for ${sourceName}." }
+              for ($index = 0; $index -lt $expected.Count; $index++) {
+                $actual = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String([string]$call.output[$index]))
+                if ($actual -cne $expected[$index]) { throw "Argument $index changed for ${sourceName}: '$actual'" }
+              }
+              if ($env:GH_FORCE_TTY -cne '80') { throw "GH_FORCE_TTY was not restored for ${sourceName}." }
+              if ((@($call.output) + @($call.error) -join "`n").Contains('fixture-token-not-for-output')) { throw "Token leaked into captured output for ${sourceName}." }
+
+              $failureCall = Invoke-TrustedGitHubCli -TrustedGitHubCli $trustedFixture -Arguments ($nativeArguments[0..6] + '__failure__') -Token 'fixture-token-not-for-output'
+              if ($failureCall.exit_code -ne 23) { throw "Nonzero exit code changed for ${sourceName}: $($failureCall.exit_code)" }
+              if ($failureCall.diagnostic.Length -gt 4096) { throw "Failure diagnostic was not bounded for ${sourceName}." }
+              $failureText = @(@($failureCall.output) + @($failureCall.error) + @($failureCall.diagnostic)) -join "`n"
+              if ($failureText.Contains('fixture-token-not-for-output')) { throw "Token leaked into failure diagnostics for ${sourceName}." }
+              if (-not $failureText.Contains('[REDACTED]') -or -not $failureText.Contains('...[truncated]')) { throw "Failure diagnostic was not redacted and truncated for ${sourceName}." }
+              if ($env:GH_FORCE_TTY -cne '80') { throw "GH_FORCE_TTY was not restored after failure for ${sourceName}." }
+
+              $largeCall = Invoke-TrustedGitHubCli -TrustedGitHubCli $trustedFixture -Arguments ($nativeArguments[0..6] + '__large__') -Token 'fixture-token-not-for-output'
+              if ($largeCall.exit_code -ne 0) { throw "Large dual-stream process failed for ${sourceName}." }
+              if (([string]$largeCall.output[0]).Length -lt 131072 -or ([string]$largeCall.error[0]).Length -lt 131072) { throw "Large dual streams were not fully drained for ${sourceName}." }
+              if ($env:GH_FORCE_TTY -cne '80') { throw "GH_FORCE_TTY was not restored after large output for ${sourceName}." }
+            }
+            'github-success-stderr=passed'
+            """;
+
+        try
+        {
+            var result = RunWindowsPowerShell(script, new Dictionary<string, string?>
+            {
+                ["LIVE_VALIDATION_STDERR_FIXTURE"] = fixtureScript,
+                ["GH_FORCE_TTY"] = "80",
+            });
+
+            Assert.True(
+                result.ExitCode == 0,
+                $"Native Windows PowerShell stderr-capture fixture failed. stdout: {result.StandardOutput} stderr: {result.StandardError}");
+            Assert.Contains("github-success-stderr=passed", result.StandardOutput, StringComparison.Ordinal);
+        }
+        finally
+        {
+            if (Directory.Exists(fixtureRoot))
+            {
+                Directory.Delete(fixtureRoot, recursive: true);
+            }
+        }
     }
 
     [Fact]
