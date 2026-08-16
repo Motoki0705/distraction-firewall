@@ -291,11 +291,33 @@ public sealed class CleanupFailureDiagnosticTests
         string script,
         IReadOnlyDictionary<string, string?> environment)
     {
-        var executable = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.System),
+        var windowsDirectory = Path.GetFullPath(
+            Environment.GetFolderPath(Environment.SpecialFolder.Windows));
+        var systemDirectory = Path.GetFullPath(
+            Environment.GetFolderPath(Environment.SpecialFolder.System));
+        if (!systemDirectory.StartsWith(
+                windowsDirectory.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException("The native Windows system directory escaped the Windows directory.");
+        }
+
+        var windowsPowerShellHome = Path.Combine(
+            systemDirectory,
             "WindowsPowerShell",
-            "v1.0",
-            "powershell.exe");
+            "v1.0");
+        var nativeModuleRoot = Path.Combine(windowsPowerShellHome, "Modules");
+        var executable = Path.Combine(windowsPowerShellHome, "powershell.exe");
+        var moduleRootBase64 = Convert.ToBase64String(Encoding.Unicode.GetBytes(nativeModuleRoot));
+        var bootstrappedScript = $$"""
+            $trustedPowerShellModuleRoot = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('{{moduleRootBase64}}'))
+            foreach ($moduleName in @('Microsoft.PowerShell.Management', 'Microsoft.PowerShell.Utility', 'Microsoft.PowerShell.Security')) {
+                $moduleManifest = [IO.Path]::Combine($trustedPowerShellModuleRoot, $moduleName, "$moduleName.psd1")
+                Microsoft.PowerShell.Core\Import-Module -Name $moduleManifest -Force -ErrorAction Stop
+            }
+            $PSModuleAutoLoadingPreference = 'None'
+            {{script}}
+            """;
         var startInfo = new ProcessStartInfo
         {
             FileName = executable,
@@ -310,11 +332,13 @@ public sealed class CleanupFailureDiagnosticTests
         startInfo.ArgumentList.Add("-ExecutionPolicy");
         startInfo.ArgumentList.Add("Bypass");
         startInfo.ArgumentList.Add("-EncodedCommand");
-        startInfo.ArgumentList.Add(Convert.ToBase64String(Encoding.Unicode.GetBytes(script)));
+        startInfo.ArgumentList.Add(Convert.ToBase64String(Encoding.Unicode.GetBytes(bootstrappedScript)));
         foreach (var (name, value) in environment)
         {
             startInfo.Environment[name] = value;
         }
+
+        startInfo.Environment["PSModulePath"] = nativeModuleRoot;
 
         using var process = new Process { StartInfo = startInfo };
         Assert.True(process.Start(), "Windows PowerShell 5.1 did not start.");

@@ -449,7 +449,7 @@ public sealed class LiveValidationSecurityTests
             $ErrorActionPreference = 'Stop'
             $source = [IO.File]::ReadAllText($env:LIVE_VALIDATION_SOURCE)
             $start = $source.IndexOf('$windowsDirectory = ', [StringComparison]::Ordinal)
-            $endMarker = "$PSModuleAutoLoadingPreference = 'None'"
+            $endMarker = "`$PSModuleAutoLoadingPreference = 'None'"
             $end = $source.IndexOf($endMarker, $start, [StringComparison]::Ordinal) + $endMarker.Length
             if ($start -lt 0 -or $end -lt $endMarker.Length) { throw 'Trusted startup prefix was not found.' }
             $prefix = $source.Substring($start, $end - $start)
@@ -890,7 +890,9 @@ public sealed class LiveValidationSecurityTests
 
         var result = RunWindowsPowerShell(script);
 
-        Assert.Equal(0, result.ExitCode);
+        Assert.True(
+            result.ExitCode == 0,
+            $"Trusted-system binary validation failed.{Environment.NewLine}{result.StandardError}{Environment.NewLine}{result.StandardOutput}");
         Assert.Contains("system-path-acl=passed", result.StandardOutput, StringComparison.Ordinal);
     }
 
@@ -1146,12 +1148,34 @@ public sealed class LiveValidationSecurityTests
         string script,
         IReadOnlyDictionary<string, string?>? environment = null)
     {
-        var executable = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.System),
+        var windowsDirectory = Path.GetFullPath(
+            Environment.GetFolderPath(Environment.SpecialFolder.Windows));
+        var systemDirectory = Path.GetFullPath(
+            Environment.GetFolderPath(Environment.SpecialFolder.System));
+        if (!systemDirectory.StartsWith(
+                windowsDirectory.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException("The native Windows system directory escaped the Windows directory.");
+        }
+
+        var windowsPowerShellHome = Path.Combine(
+            systemDirectory,
             "WindowsPowerShell",
-            "v1.0",
-            "powershell.exe");
-        var encoded = Convert.ToBase64String(Encoding.Unicode.GetBytes(script));
+            "v1.0");
+        var nativeModuleRoot = Path.Combine(windowsPowerShellHome, "Modules");
+        var executable = Path.Combine(windowsPowerShellHome, "powershell.exe");
+        var moduleRootBase64 = Convert.ToBase64String(Encoding.Unicode.GetBytes(nativeModuleRoot));
+        var bootstrappedScript = $$"""
+            $trustedPowerShellModuleRoot = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('{{moduleRootBase64}}'))
+            foreach ($moduleName in @('Microsoft.PowerShell.Management', 'Microsoft.PowerShell.Utility', 'Microsoft.PowerShell.Security')) {
+                $moduleManifest = [IO.Path]::Combine($trustedPowerShellModuleRoot, $moduleName, "$moduleName.psd1")
+                Microsoft.PowerShell.Core\Import-Module -Name $moduleManifest -Force -ErrorAction Stop
+            }
+            $PSModuleAutoLoadingPreference = 'None'
+            {{script}}
+            """;
+        var encoded = Convert.ToBase64String(Encoding.Unicode.GetBytes(bootstrappedScript));
         var startInfo = new ProcessStartInfo
         {
             FileName = executable,
@@ -1168,6 +1192,7 @@ public sealed class LiveValidationSecurityTests
         startInfo.ArgumentList.Add("-EncodedCommand");
         startInfo.ArgumentList.Add(encoded);
         startInfo.Environment["LIVE_VALIDATION_REPOSITORY_ROOT"] = RepositoryRoot;
+        startInfo.Environment["PSModulePath"] = nativeModuleRoot;
         if (environment is not null)
         {
             foreach (var (name, value) in environment)
