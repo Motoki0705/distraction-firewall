@@ -1,4 +1,6 @@
 using System.IO.Pipes;
+using System.Runtime.Versioning;
+using System.Security.Principal;
 using DistractionFirewall.Contracts;
 using DistractionFirewall.Ipc;
 using Microsoft.Win32.SafeHandles;
@@ -16,7 +18,7 @@ public sealed class NamedPipeServerIdentityTests
             new FakeServerIdentityNative(new NamedPipeServerProcessIdentity(
                 ProcessId: 42,
                 UserSid: "S-1-5-21-1000-1000-1000-1000",
-                ImagePath: @"C:\foreign.exe")),
+                ServiceCommandLine: "\"C:\\foreign.exe\" --service")),
             imagePolicy);
 
         if (!OperatingSystem.IsWindows())
@@ -38,7 +40,7 @@ public sealed class NamedPipeServerIdentityTests
             new FakeServerIdentityNative(new NamedPipeServerProcessIdentity(
                 ProcessId: 42,
                 UserSid: "S-1-5-18",
-                ImagePath: @"C:\Program Files\Distraction Firewall Lease Runtime\activation-service\distraction-firewall-activation-service.exe")),
+                ServiceCommandLine: "\"C:\\Program Files\\Distraction Firewall Lease Runtime\\activation-service\\distraction-firewall-activation-service.exe\" --service")),
             imagePolicy);
 
         if (!OperatingSystem.IsWindows())
@@ -51,8 +53,8 @@ public sealed class NamedPipeServerIdentityTests
 
         Assert.Equal(1, imagePolicy.CallCount);
         Assert.EndsWith(
-            "distraction-firewall-activation-service.exe",
-            imagePolicy.LastImagePath,
+            "distraction-firewall-activation-service.exe\" --service",
+            imagePolicy.LastServiceCommandLine,
             StringComparison.Ordinal);
     }
 
@@ -64,7 +66,7 @@ public sealed class NamedPipeServerIdentityTests
             new FakeServerIdentityNative(new NamedPipeServerProcessIdentity(
                 ProcessId: 42,
                 UserSid: "S-1-5-18",
-                ImagePath: @"C:\wrong.exe")),
+                ServiceCommandLine: "\"C:\\wrong.exe\" --service")),
             new FakeImagePolicy
             {
                 Failure = new UnauthorizedAccessException("wrong image"),
@@ -92,18 +94,154 @@ public sealed class NamedPipeServerIdentityTests
         fileSystem.AddDirectory(serviceRoot);
         fileSystem.AddFile(expected);
         var policy = new InstalledActivationServiceImagePolicy(trustedRoot, expected, fileSystem);
+        var expectedCommandLine = $"\"{expected}\" --service";
 
-        policy.DemandExpectedAndProtected(expected.ToUpperInvariant());
+        policy.DemandExpectedAndProtected($"\"{expected.ToUpperInvariant()}\" --service");
         Assert.Throws<UnauthorizedAccessException>(() =>
-            policy.DemandExpectedAndProtected(Path.Combine(serviceRoot, "foreign.exe")));
+            policy.DemandExpectedAndProtected($"\"{Path.Combine(serviceRoot, "foreign.exe")}\" --service"));
+        foreach (var invalidCommandLine in new[]
+        {
+            $"\"{expected}\" --console",
+            $"\"{expected}\" --SERVICE",
+            $"\"{expected}\"  --service",
+            $"\"{expected}\" --service extra",
+            $"{expected} --service",
+            @"%ProgramFiles%\Distraction Firewall Lease Runtime\activation-service\distraction-firewall-activation-service.exe --service",
+        })
+        {
+            Assert.Throws<UnauthorizedAccessException>(() =>
+                policy.DemandExpectedAndProtected(invalidCommandLine));
+        }
 
         fileSystem.Remove(expected);
         Assert.Throws<UnauthorizedAccessException>(() =>
-            policy.DemandExpectedAndProtected(expected));
+            policy.DemandExpectedAndProtected(expectedCommandLine));
         fileSystem.AddFile(expected);
         fileSystem.AddDirectory(runtimeRoot, reparsePoint: true);
         Assert.Throws<UnauthorizedAccessException>(() =>
-            policy.DemandExpectedAndProtected(expected));
+            policy.DemandExpectedAndProtected(expectedCommandLine));
+    }
+
+    [Fact]
+    public void Native_identity_accepts_only_a_stable_running_own_process_service_pid()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var pipeHandle = new SafePipeHandle((nint)1234, ownsHandle: false);
+        var commandLine =
+            "\"C:\\Program Files\\Distraction Firewall Lease Runtime\\activation-service\\distraction-firewall-activation-service.exe\" --service";
+        var api = new FakeWindowsActivationServiceIdentityApi(
+            [42, 42],
+            CreateServiceSnapshot(42, commandLine));
+        var native = new WindowsNamedPipeServerIdentityNative(api);
+
+        var identity = native.Inspect(pipeHandle);
+
+        Assert.Equal((uint)42, identity.ProcessId);
+        Assert.Equal("S-1-5-18", identity.UserSid);
+        Assert.Equal(commandLine, identity.ServiceCommandLine);
+        Assert.Equal(2, api.PipeProcessIdCallCount);
+        Assert.Equal(1, api.ServiceQueryCallCount);
+    }
+
+    [Fact]
+    public void Native_identity_fails_closed_for_pid_reuse_or_non_service_processes()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        using var pipeHandle = new SafePipeHandle((nint)1234, ownsHandle: false);
+        const string commandLine = "\"C:\\fixed.exe\" --service";
+        var cases = new[]
+        {
+            new FakeWindowsActivationServiceIdentityApi(
+                [42, 43],
+                CreateServiceSnapshot(42, commandLine)),
+            new FakeWindowsActivationServiceIdentityApi(
+                [42, 42],
+                CreateServiceSnapshot(43, commandLine)),
+            new FakeWindowsActivationServiceIdentityApi(
+                [42, 42],
+                CreateServiceSnapshot(42, commandLine) with
+                {
+                    AfterConfigurationRead = new WindowsServiceProcessStatus(0x10, 4, 43),
+                }),
+            new FakeWindowsActivationServiceIdentityApi(
+                [42, 42],
+                CreateServiceSnapshot(42, commandLine) with
+                {
+                    BeforeConfigurationRead = new WindowsServiceProcessStatus(0x20, 4, 42),
+                }),
+            new FakeWindowsActivationServiceIdentityApi(
+                [42, 42],
+                CreateServiceSnapshot(42, commandLine) with
+                {
+                    AfterConfigurationRead = new WindowsServiceProcessStatus(0x10, 1, 42),
+                }),
+            new FakeWindowsActivationServiceIdentityApi(
+                [42, 42],
+                CreateServiceSnapshot(42, commandLine) with
+                {
+                    InterrogatedStatus = new WindowsServiceStatus(0x10, 1),
+                }),
+        };
+
+        foreach (var api in cases)
+        {
+            AssertNativeIdentityRejected(api, pipeHandle);
+        }
+    }
+
+    [SupportedOSPlatform("windows")]
+    [Fact]
+    public void Scm_local_system_sentinel_resolves_deterministically_to_well_known_sid()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var expected = new SecurityIdentifier(
+            WellKnownSidType.LocalSystemSid,
+            domainSid: null).Value;
+
+        Assert.Equal(expected, WindowsActivationServiceIdentityApi.ResolveAccountSid("LocalSystem"));
+        Assert.Equal(expected, WindowsActivationServiceIdentityApi.ResolveAccountSid("localsystem"));
+        Assert.Throws<UnauthorizedAccessException>(() =>
+            WindowsActivationServiceIdentityApi.ResolveAccountSid(
+                "DistractionFirewall-Definitely-Unmapped-Account"));
+    }
+
+    [SupportedOSPlatform("windows")]
+    [Fact]
+    public async Task Installed_standard_user_rpc_identity_check_is_live_capable_when_opted_in()
+    {
+        if (!string.Equals(
+                Environment.GetEnvironmentVariable("DISTRACTION_FIREWALL_LIVE_INSTALLED_IPC"),
+                "1",
+                StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        Assert.True(OperatingSystem.IsWindows());
+        using var identity = WindowsIdentity.GetCurrent();
+        var principal = new WindowsPrincipal(identity);
+        Assert.False(principal.IsInRole(WindowsBuiltInRole.Administrator));
+        Assert.NotEqual("S-1-5-18", identity.User?.Value);
+        var client = new NamedPipeRpcClient();
+        var response = await client.CallAsync<ProtocolRequest, CapabilitiesResponse>(
+            RpcMethods.GetCapabilities,
+            new ProtocolRequest(ProtocolConstants.CurrentVersion),
+            TimeSpan.FromSeconds(10));
+
+        Assert.Equal(ProtocolConstants.CurrentVersion, response.ProtocolVersion);
+        Assert.Contains(RpcMethods.GetStatus, response.Methods);
     }
 
     [Fact]
@@ -150,17 +288,66 @@ public sealed class NamedPipeServerIdentityTests
 
         public int CallCount { get; private set; }
 
-        public string? LastImagePath { get; private set; }
+        public string? LastServiceCommandLine { get; private set; }
 
-        public void DemandExpectedAndProtected(string actualImagePath)
+        public void DemandExpectedAndProtected(string actualServiceCommandLine)
         {
             CallCount++;
-            LastImagePath = actualImagePath;
+            LastServiceCommandLine = actualServiceCommandLine;
             if (Failure is not null)
             {
                 throw Failure;
             }
         }
+    }
+
+    private sealed class FakeWindowsActivationServiceIdentityApi
+        : IWindowsActivationServiceIdentityApi
+    {
+        private readonly Queue<uint> _pipeProcessIds;
+        private readonly WindowsActivationServiceSnapshot _service;
+
+        public FakeWindowsActivationServiceIdentityApi(
+            IEnumerable<uint> pipeProcessIds,
+            WindowsActivationServiceSnapshot service)
+        {
+            _pipeProcessIds = new Queue<uint>(pipeProcessIds);
+            _service = service;
+        }
+
+        public int PipeProcessIdCallCount { get; private set; }
+
+        public int ServiceQueryCallCount { get; private set; }
+
+        public uint GetNamedPipeServerProcessId(SafePipeHandle pipeHandle)
+        {
+            PipeProcessIdCallCount++;
+            return _pipeProcessIds.Dequeue();
+        }
+
+        public WindowsActivationServiceSnapshot QueryActivationService()
+        {
+            ServiceQueryCallCount++;
+            return _service;
+        }
+    }
+
+    private static WindowsActivationServiceSnapshot CreateServiceSnapshot(
+        uint processId,
+        string commandLine) => new(
+            new WindowsServiceProcessStatus(0x10, 4, processId),
+            new WindowsServiceStatus(0x10, 4),
+            new WindowsServiceProcessStatus(0x10, 4, processId),
+            "S-1-5-18",
+            commandLine);
+
+    [SupportedOSPlatform("windows")]
+    private static void AssertNativeIdentityRejected(
+        IWindowsActivationServiceIdentityApi api,
+        SafePipeHandle pipeHandle)
+    {
+        Assert.Throws<UnauthorizedAccessException>(() =>
+            new WindowsNamedPipeServerIdentityNative(api).Inspect(pipeHandle));
     }
 
     private sealed class ThrowingServerIdentityVerifier : INamedPipeServerIdentityVerifier
