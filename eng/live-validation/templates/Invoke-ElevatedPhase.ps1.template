@@ -5,7 +5,21 @@ param()
 
 Set-StrictMode -Version Latest
 $script:stageCreatedByCampaign = $false
+$script:campaignError = $null
 $ErrorActionPreference = 'Stop'
+
+function ConvertTo-BoundedDiagnosticText {
+    param(
+        [AllowNull()][object]$Value,
+        [ValidateRange(64, 4096)][int]$MaximumLength = 2048
+    )
+
+    if ($null -eq $Value) { return $null }
+    $text = [string]$Value
+    if ($text.Length -le $MaximumLength) { return $text }
+    $suffix = '... [truncated]'
+    return $text.Substring(0, $MaximumLength - $suffix.Length) + $suffix
+}
 
 $windowsDirectory = [IO.Path]::GetFullPath([Environment]::GetFolderPath([Environment+SpecialFolder]::Windows)).TrimEnd('\')
 $systemDirectory = [IO.Path]::GetFullPath([Environment]::GetFolderPath([Environment+SpecialFolder]::System)).TrimEnd('\')
@@ -44,7 +58,6 @@ $script:installerRoot = [IO.Path]::Combine($windowsDirectory, 'Installer')
 $serviceName = [string]$campaign.fixed.ServiceName
 $installedCandidate = $false
 $candidateInstallAttempted = $false
-$campaignError = $null
 $cleanupErrors = [Collections.Generic.List[string]]::new()
 $steps = [Collections.Generic.List[object]]::new()
 $candidateLocalPackages = @()
@@ -948,7 +961,7 @@ function Assert-RecoveryMachinePreflight {
     Assert-LeafFingerprint $campaign.paths.service_exe ([int64]$approvedRecoveryExistingService.size) $approvedRecoveryExistingService.sha256 $approvedRecoveryExistingService.authenticodeStatus 'code-approved pre-recovery activation service executable'
     $null = Assert-NoOwnedSystemObjects 'pre-recovery'
     foreach ($bundleKey in @($campaign.recovery.manifest.orphanBundleProviderKeys)) {
-        Assert-Condition ((Get-BundleRegistration $bundleKey).Count -eq 0) "Recovery preflight found the orphan Bundle registered: $bundleKey"
+        Assert-Condition (@(Get-BundleRegistration $bundleKey).Count -eq 0) "Recovery preflight found the orphan Bundle registered: $bundleKey"
         Assert-Condition (-not (Test-DependencyProvider $bundleKey)) "Recovery preflight found the orphan Bundle dependency provider: $bundleKey"
         $bundleCache = [IO.Path]::GetFullPath((Join-Path $campaign.paths.package_cache_root $bundleKey))
         Assert-Condition ([IO.Path]::GetDirectoryName($bundleCache).Equals([IO.Path]::GetFullPath($campaign.paths.package_cache_root).TrimEnd('\'), [StringComparison]::OrdinalIgnoreCase)) 'Recovery Bundle cache escaped Package Cache root.'
@@ -972,7 +985,7 @@ function Remove-ExactOrphanPackageCaches {
     if ($null -eq $campaign.recovery) { return @() }
     $removed = @()
     foreach ($bundleKey in @($campaign.recovery.manifest.orphanBundleProviderKeys)) {
-        Assert-Condition ((Get-BundleRegistration $bundleKey).Count -eq 0) "Orphan Bundle provider is still registered: $bundleKey"
+        Assert-Condition (@(Get-BundleRegistration $bundleKey).Count -eq 0) "Orphan Bundle provider is still registered: $bundleKey"
         Assert-Condition (-not (Test-DependencyProvider $bundleKey)) "Orphan Bundle dependency provider is still registered: $bundleKey"
     }
     foreach ($cache in @($campaign.recovery.manifest.orphanPackageCaches)) {
@@ -1056,7 +1069,7 @@ function Assert-MsiRecordIdentity {
 }
 
 function Assert-RuntimeAbsent {
-    Assert-Condition ((Get-RelatedProducts $campaign.fixed.RuntimeUpgradeCode).Count -eq 0) 'A Runtime MSI remains in the fixed UpgradeCode family.'
+    Assert-Condition (@(Get-RelatedProducts $campaign.fixed.RuntimeUpgradeCode).Count -eq 0) 'A Runtime MSI remains in the fixed UpgradeCode family.'
     Assert-Condition ($null -eq (Get-Service -Name $serviceName -ErrorAction SilentlyContinue)) 'Activation service remains installed.'
     Assert-Condition (-not (Test-Path -LiteralPath $campaign.paths.runtime_root)) 'Runtime Program Files root remains.'
     Assert-Condition (-not (Test-Path -LiteralPath $campaign.paths.runtime_data_root)) 'Runtime ProgramData root remains.'
@@ -1064,7 +1077,7 @@ function Assert-RuntimeAbsent {
 }
 
 function Assert-AppAbsent {
-    Assert-Condition ((Get-RelatedProducts $campaign.fixed.AppUpgradeCode).Count -eq 0) 'An App MSI remains in the fixed UpgradeCode family.'
+    Assert-Condition (@(Get-RelatedProducts $campaign.fixed.AppUpgradeCode).Count -eq 0) 'An App MSI remains in the fixed UpgradeCode family.'
     Assert-Condition (-not (Test-Path -LiteralPath $campaign.paths.app_root)) 'App Program Files root remains.'
 }
 
@@ -1319,7 +1332,7 @@ function Assert-CandidatePackageStatePreflight {
     $packageCacheRootItem = Get-Item -LiteralPath $packageCacheRoot -Force
     Assert-Condition (($packageCacheRootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) 'Candidate Package Cache root is a reparse point.'
     Assert-NoBroadWriteAcl $packageCacheRoot 'candidate Package Cache root'
-    Assert-Condition ((Get-BundleRegistration $campaign.candidate.setup.bundle_provider_key).Count -eq 0) 'Candidate Bundle is already registered.'
+    Assert-Condition (@(Get-BundleRegistration $campaign.candidate.setup.bundle_provider_key).Count -eq 0) 'Candidate Bundle is already registered.'
     Assert-Condition (-not (Test-DependencyProvider $campaign.candidate.setup.bundle_provider_key)) 'Candidate Bundle dependency provider already exists.'
     foreach ($record in @($campaign.candidate.app_msi, $campaign.candidate.runtime_msi)) {
         Assert-Condition ((Get-ProductState $record.product_code) -eq -1) "Candidate ProductCode is already registered or in a non-absent state: $($record.product_code)"
@@ -1333,14 +1346,17 @@ function Assert-CandidatePackageStatePreflight {
 }
 
 trap {
-    $fatalMessage = $_.Exception.Message
+    $currentFatalMessage = ConvertTo-BoundedDiagnosticText $_.Exception.Message
+    $bodyFatalMessage = ConvertTo-BoundedDiagnosticText $script:campaignError
+    $fatalMessage = if ([string]::IsNullOrWhiteSpace($bodyFatalMessage)) { $currentFatalMessage } else { $bodyFatalMessage }
+    $fatalSecondaryError = if (-not [string]::IsNullOrWhiteSpace($bodyFatalMessage) -and $currentFatalMessage -cne $bodyFatalMessage) { $currentFatalMessage } else { $null }
     $fatalTeardownError = $null
     if ($script:stageCreatedByCampaign) {
         try {
             Remove-VerifiedStageTree $stageRoot
             $script:stageCreatedByCampaign = $false
         }
-        catch { $fatalTeardownError = $_.Exception.Message }
+        catch { $fatalTeardownError = ConvertTo-BoundedDiagnosticText $_.Exception.Message }
     }
     try {
         if (Test-Path -LiteralPath $returnedEvidenceRoot -PathType Container) {
@@ -1352,6 +1368,7 @@ trap {
                     outcome = 'failed'
                     recorded_at_utc = [DateTime]::UtcNow.ToString('o')
                     error = $fatalMessage
+                    secondary_error = $fatalSecondaryError
                     protected_stage_teardown_error = $fatalTeardownError
                     lease_started = $false
                 })
@@ -1473,12 +1490,12 @@ try {
     Add-Step 'standard-user-smoke' 'passed' ([string]$smokeEvidence.owner_sid)
 }
 catch {
-    $campaignError = $_.Exception.Message
-    Add-Step 'campaign-body' 'failed' $campaignError
+    $script:campaignError = ConvertTo-BoundedDiagnosticText $_.Exception.Message
+    Add-Step 'campaign-body' 'failed' $script:campaignError
 }
 finally {
     try {
-        if ($candidateInstallAttempted -or $installedCandidate -or (Get-ProductState $campaign.candidate.app_msi.product_code) -eq 5 -or (Get-ProductState $campaign.candidate.runtime_msi.product_code) -eq 5 -or (Get-BundleRegistration $campaign.candidate.setup.bundle_provider_key).Count -gt 0) {
+        if ($candidateInstallAttempted -or $installedCandidate -or (Get-ProductState $campaign.candidate.app_msi.product_code) -eq 5 -or (Get-ProductState $campaign.candidate.runtime_msi.product_code) -eq 5 -or @(Get-BundleRegistration $campaign.candidate.setup.bundle_provider_key).Count -gt 0) {
             Assert-Condition (-not (Test-Path -LiteralPath $campaign.paths.active_marker)) 'An active lease blocks safe candidate cleanup.'
             $uninstallEvidence = Invoke-CandidateUninstall
         }
@@ -1493,7 +1510,7 @@ $residualErrors = [Collections.Generic.List[string]]::new()
 foreach ($check in @(
     [pscustomobject]@{ Name = 'App ProductCode'; Present = ((Get-ProductState $campaign.candidate.app_msi.product_code) -ne -1) },
     [pscustomobject]@{ Name = 'Runtime ProductCode'; Present = ((Get-ProductState $campaign.candidate.runtime_msi.product_code) -ne -1) },
-    [pscustomobject]@{ Name = 'Bundle registration'; Present = ((Get-BundleRegistration $campaign.candidate.setup.bundle_provider_key).Count -ne 0) },
+    [pscustomobject]@{ Name = 'Bundle registration'; Present = (@(Get-BundleRegistration $campaign.candidate.setup.bundle_provider_key).Count -ne 0) },
     [pscustomobject]@{ Name = 'Activation service'; Present = ($null -ne (Get-Service -Name $serviceName -ErrorAction SilentlyContinue)) },
     [pscustomobject]@{ Name = 'App root'; Present = (Test-Path -LiteralPath $campaign.paths.app_root) },
     [pscustomobject]@{ Name = 'Runtime root'; Present = (Test-Path -LiteralPath $campaign.paths.runtime_root) },
@@ -1503,8 +1520,8 @@ foreach ($check in @(
 )) {
     if ($check.Present) { $residualErrors.Add("$($check.Name) remains") }
 }
-if ((Get-RelatedProducts $campaign.fixed.AppUpgradeCode).Count -ne 0) { $residualErrors.Add('App UpgradeCode family is not empty') }
-if ((Get-RelatedProducts $campaign.fixed.RuntimeUpgradeCode).Count -ne 0) { $residualErrors.Add('Runtime UpgradeCode family is not empty') }
+if (@(Get-RelatedProducts $campaign.fixed.AppUpgradeCode).Count -ne 0) { $residualErrors.Add('App UpgradeCode family is not empty') }
+if (@(Get-RelatedProducts $campaign.fixed.RuntimeUpgradeCode).Count -ne 0) { $residualErrors.Add('Runtime UpgradeCode family is not empty') }
 foreach ($localPackage in @($candidateLocalPackages | Sort-Object -Unique)) {
     if (Test-Path -LiteralPath $localPackage) { $residualErrors.Add("Candidate Windows Installer LocalPackage remains: $localPackage") }
 }
@@ -1553,7 +1570,7 @@ catch {
     $stageCleanupError = $_.Exception.Message
     $cleanupErrors.Add("Protected staging teardown failed: $stageCleanupError")
 }
-$resultOutcome = if ($null -eq $campaignError -and $cleanupErrors.Count -eq 0 -and $null -ne $smokeEvidence -and [string]$smokeEvidence.outcome -ceq 'passed') { 'passed' } else { 'failed' }
+$resultOutcome = if ($null -eq $script:campaignError -and $cleanupErrors.Count -eq 0 -and $null -ne $smokeEvidence -and [string]$smokeEvidence.outcome -ceq 'passed') { 'passed' } else { 'failed' }
 $result = [ordered]@{
     schema = 'distraction-firewall/live-validation-result/v1'
     campaign_id = [string]$campaign.campaign_id
@@ -1585,7 +1602,7 @@ $result = [ordered]@{
     standard_user_smoke = $smokeEvidence
     uninstall = $uninstallEvidence
     steps = @($steps)
-    campaign_error = $campaignError
+    campaign_error = $script:campaignError
     cleanup_errors = @($cleanupErrors)
     protected_stage_teardown_error = $stageCleanupError
     residual_errors = @($residualErrors)
@@ -1613,7 +1630,7 @@ $hashLines = @(
 [IO.File]::WriteAllLines((Join-Path $returnedEvidenceRoot 'evidence.sha256'), $hashLines, [Text.UTF8Encoding]::new($false))
 
 if ($resultOutcome -cne 'passed') {
-    [Console]::Error.WriteLine("Live-validation campaign failed: $campaignError; cleanup: $($cleanupErrors -join '; ')")
+    [Console]::Error.WriteLine("Live-validation campaign failed: $script:campaignError; cleanup: $($cleanupErrors -join '; ')")
     exit 1
 }
 exit 0
