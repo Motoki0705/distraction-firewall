@@ -46,6 +46,17 @@ function Assert-Condition {
     if (-not $Condition) { throw $Message }
 }
 
+function Read-StrictUtf8Json {
+    param([Parameter(Mandatory)][string]$Path)
+
+    $strictUtf8 = [Text.UTF8Encoding]::new($false, $true)
+    $text = $strictUtf8.GetString([IO.File]::ReadAllBytes($Path))
+    if ($text.Length -gt 0 -and $text[0] -eq [char]0xFEFF) {
+        $text = $text.Substring(1)
+    }
+    return $text | ConvertFrom-Json
+}
+
 function Import-TrustedSystemNetHttpAssembly {
     $systemNetHttpAssemblyIdentity = 'System.Net.Http, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a'
     $trustedSystemNetHttpPath = [IO.Path]::Combine(
@@ -594,7 +605,7 @@ finally { $archive.Dispose() }
 
 $manifestFiles = @(Get-ChildItem -LiteralPath $candidateRoot -File -Filter '*.candidate-manifest.json')
 Assert-Condition ($manifestFiles.Count -eq 1) 'Artifact must contain exactly one candidate manifest.'
-$manifest = Get-Content -LiteralPath $manifestFiles[0].FullName -Raw | ConvertFrom-Json
+$manifest = Read-StrictUtf8Json $manifestFiles[0].FullName
 Assert-Condition ([string]$manifest.schema -ceq 'distraction-firewall/build-once-candidate/v1') 'Candidate manifest schema is unsupported.'
 Assert-Condition ([string]$manifest.source.repository -ceq $repository) 'Candidate manifest repository mismatch.'
 Assert-Condition ([string]$manifest.source.commitSha -ceq [string]$runApi.head_sha) 'Candidate manifest source SHA differs from GitHub.'
