@@ -763,6 +763,93 @@ public sealed class LiveValidationSecurityTests
     }
 
     [Fact]
+    public void Candidate_downloader_strong_loads_System_Net_Http_from_the_native_GAC_before_typed_use()
+    {
+        var downloader = ReadLiveValidationFile("Get-BuildOnceCandidate.ps1");
+        const string assemblyIdentity = "System.Net.Http, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a";
+
+        var load = downloader.IndexOf("$null = Import-TrustedSystemNetHttpAssembly", StringComparison.Ordinal);
+        var firstTypedUse = downloader.IndexOf("[Net.Http.", StringComparison.Ordinal);
+        Assert.True(load >= 0 && firstTypedUse > load, "System.Net.Http must be loaded before the first typed use.");
+        Assert.Contains(assemblyIdentity, downloader, StringComparison.Ordinal);
+        Assert.Contains("[Reflection.Assembly]::Load($systemNetHttpAssemblyIdentity)", downloader, StringComparison.Ordinal);
+        Assert.Contains("$systemNetHttpAssembly.GlobalAssemblyCache", downloader, StringComparison.Ordinal);
+        Assert.Contains("$loadedSystemNetHttpPath.Equals($trustedSystemNetHttpPath", downloader, StringComparison.Ordinal);
+        Assert.Contains("'GAC_MSIL'", downloader, StringComparison.Ordinal);
+        Assert.DoesNotContain("Add-Type -AssemblyName System.Net.Http", downloader, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("[Reflection.Assembly]::LoadFrom", downloader, StringComparison.OrdinalIgnoreCase);
+
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var fixtureRoot = Path.Combine(Path.GetTempPath(), $"df-system-net-http-trap-{Guid.NewGuid():N}");
+        var marker = Path.Combine(fixtureRoot, "fake-module-loaded.txt");
+        Directory.CreateDirectory(Path.Combine(fixtureRoot, "System.Net.Http"));
+        File.WriteAllText(Path.Combine(fixtureRoot, "System.Net.Http.dll"), "not a trusted assembly");
+        File.WriteAllText(
+            Path.Combine(fixtureRoot, "System.Net.Http", "System.Net.Http.psd1"),
+            "@{ RootModule = 'System.Net.Http.psm1'; ModuleVersion = '4.0.0.0' }");
+        File.WriteAllText(
+            Path.Combine(fixtureRoot, "System.Net.Http", "System.Net.Http.psm1"),
+            "[IO.File]::WriteAllText($env:LIVE_VALIDATION_ASSEMBLY_MARKER, 'loaded')");
+
+        const string script = """
+            $ErrorActionPreference = 'Stop'
+            Microsoft.PowerShell.Management\Set-Location -LiteralPath $env:LIVE_VALIDATION_ASSEMBLY_TRAP
+            $sourcePath = [IO.Path]::Combine($env:LIVE_VALIDATION_REPOSITORY_ROOT, 'eng', 'live-validation', 'Get-BuildOnceCandidate.ps1')
+            $tokens = $null
+            $errors = $null
+            $ast = [Management.Automation.Language.Parser]::ParseFile($sourcePath, [ref]$tokens, [ref]$errors)
+            if ($errors.Count -ne 0) { throw ($errors.Message -join '; ') }
+            foreach ($name in @('Assert-Condition', 'Import-TrustedSystemNetHttpAssembly')) {
+              $functionAst = $ast.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name }, $true)
+              if ($null -eq $functionAst) { throw "Function not found: $name" }
+              . ([ScriptBlock]::Create($functionAst.Extent.Text))
+            }
+            $nativeWindowsDirectory = [IO.Path]::GetFullPath([Environment]::GetFolderPath([Environment+SpecialFolder]::Windows)).TrimEnd('\')
+            $null = Import-TrustedSystemNetHttpAssembly
+            $handler = [Net.Http.HttpClientHandler]::new()
+            $handler.Dispose()
+            $identity = 'System.Net.Http, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a'
+            $loaded = $null
+            foreach ($candidate in [AppDomain]::CurrentDomain.GetAssemblies()) {
+              if ($candidate.FullName -ceq $identity) { $loaded = $candidate; break }
+            }
+            if ($null -eq $loaded) { throw 'System.Net.Http was not loaded.' }
+            $expectedPrefix = [IO.Path]::Combine($nativeWindowsDirectory, 'Microsoft.Net', 'assembly', 'GAC_MSIL', 'System.Net.Http') + '\'
+            if (-not ([IO.Path]::GetFullPath($loaded.Location).StartsWith($expectedPrefix, [StringComparison]::OrdinalIgnoreCase))) { throw "Untrusted assembly loaded: $($loaded.Location)" }
+            if ([IO.File]::Exists($env:LIVE_VALIDATION_ASSEMBLY_MARKER)) { throw 'The fake System.Net.Http module executed.' }
+            'system-net-http=passed'
+            """;
+
+        try
+        {
+            var result = RunWindowsPowerShell(script, new Dictionary<string, string?>
+            {
+                ["LIVE_VALIDATION_ASSEMBLY_TRAP"] = fixtureRoot,
+                ["LIVE_VALIDATION_ASSEMBLY_MARKER"] = marker,
+                ["PATH"] = fixtureRoot,
+                ["PSModulePath"] = fixtureRoot,
+            });
+
+            Assert.True(
+                result.ExitCode == 0,
+                $"Native Windows PowerShell System.Net.Http probe failed. stdout: {result.StandardOutput} stderr: {result.StandardError}");
+            Assert.Contains("system-net-http=passed", result.StandardOutput, StringComparison.Ordinal);
+            Assert.False(File.Exists(marker), "The fake System.Net.Http module executed.");
+        }
+        finally
+        {
+            if (Directory.Exists(fixtureRoot))
+            {
+                Directory.Delete(fixtureRoot, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
     public void Recovery_cache_cleanup_is_exact_acl_checked_and_double_fingerprinted()
     {
         var child = ReadLiveValidationFile("templates", "Invoke-ElevatedPhase.ps1.template");
