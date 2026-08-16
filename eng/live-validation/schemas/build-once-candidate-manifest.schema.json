@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Motoki0705/distraction-firewall/blob/main/eng/live-validation/schemas/build-once-candidate-manifest.schema.json",
+  "title": "Distraction Firewall build-once candidate manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "version", "source", "artifacts", "signing"],
+  "properties": {
+    "schema": { "const": "distraction-firewall/build-once-candidate/v1" },
+    "version": { "type": "string", "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*|[A-Za-z-][0-9A-Za-z-]*)(?:\\.(?:0|[1-9][0-9]*|[A-Za-z-][0-9A-Za-z-]*))*)?(?![\\s\\S])" },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "commitSha", "ref", "workflowPath", "workflowRef", "workflowRunId", "workflowRunAttempt", "artifactId", "artifactDigestSha256"],
+      "properties": {
+        "repository": { "const": "Motoki0705/distraction-firewall" },
+        "commitSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "ref": { "const": "refs/heads/main" },
+        "workflowPath": { "const": ".github/workflows/release-candidate.yml" },
+        "workflowRef": { "const": "Motoki0705/distraction-firewall/.github/workflows/release-candidate.yml@refs/heads/main" },
+        "workflowRunId": { "type": "integer", "minimum": 1 },
+        "workflowRunAttempt": { "type": "integer", "minimum": 1 },
+        "artifactId": { "type": "null" },
+        "artifactDigestSha256": { "type": "null" }
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["setupExe", "appMsi", "runtimeMsi", "checksum", "sbom"],
+      "properties": {
+        "setupExe": { "$ref": "#/$defs/setupArtifact" },
+        "appMsi": { "$ref": "#/$defs/msiArtifact" },
+        "runtimeMsi": { "$ref": "#/$defs/msiArtifact" },
+        "checksum": { "$ref": "#/$defs/dataArtifact" },
+        "sbom": { "$ref": "#/$defs/dataArtifact" }
+      }
+    },
+    "signing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["configured", "outerPackageStatuses", "disclosure"],
+      "properties": {
+        "configured": { "type": "boolean" },
+        "outerPackageStatuses": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["setupExe", "appMsi", "runtimeMsi"],
+          "properties": {
+            "setupExe": { "enum": ["Valid", "NotSigned"] },
+            "appMsi": { "enum": ["Valid", "NotSigned"] },
+            "runtimeMsi": { "enum": ["Valid", "NotSigned"] }
+          }
+        },
+        "disclosure": { "type": "string", "minLength": 1 }
+      }
+    }
+  },
+  "$defs": {
+    "dataArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fileName", "sha256", "sizeBytes"],
+      "properties": {
+        "fileName": { "type": "string", "pattern": "^[^\\\\/:*?\"<>|]+$" },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "sizeBytes": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "setupArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fileName", "sha256", "sizeBytes", "authenticodeStatus", "bundleProviderKey", "bundleUpgradeCode", "burnEngine"],
+      "properties": {
+        "fileName": { "type": "string", "pattern": "^[^\\\\/:*?\"<>|]+\\.exe$" },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "sizeBytes": { "type": "integer", "minimum": 1 },
+        "authenticodeStatus": { "enum": ["Valid", "NotSigned"] },
+        "bundleProviderKey": { "type": "string", "pattern": "^\\{[0-9A-F]{8}(?:-[0-9A-F]{4}){3}-[0-9A-F]{12}\\}$" },
+        "bundleUpgradeCode": { "const": "{9F89BB92-BF79-4127-A4F5-4A4A4FD88EE6}" },
+        "burnEngine": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["sizeBytes", "sha256"],
+          "properties": {
+            "sizeBytes": { "type": "integer", "minimum": 1 },
+            "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+          }
+        }
+      }
+    },
+    "msiArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fileName", "sha256", "sizeBytes", "authenticodeStatus", "productCode", "packageCode", "upgradeCode", "productVersion"],
+      "properties": {
+        "fileName": { "type": "string", "pattern": "^[^\\\\/:*?\"<>|]+\\.msi$" },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "sizeBytes": { "type": "integer", "minimum": 1 },
+        "authenticodeStatus": { "enum": ["Valid", "NotSigned"] },
+        "productCode": { "type": "string", "pattern": "^\\{[0-9A-F]{8}(?:-[0-9A-F]{4}){3}-[0-9A-F]{12}\\}$" },
+        "packageCode": { "type": "string", "pattern": "^\\{[0-9A-F]{8}(?:-[0-9A-F]{4}){3}-[0-9A-F]{12}\\}$" },
+        "upgradeCode": { "type": "string", "pattern": "^\\{[0-9A-F]{8}(?:-[0-9A-F]{4}){3}-[0-9A-F]{12}\\}$" },
+        "productVersion": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" }
+      }
+    }
+  }
+}

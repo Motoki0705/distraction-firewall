@@ -372,7 +372,7 @@ foreach ($projectPath in @(
 }
 $centralPackagesText = Get-Content -LiteralPath (Join-Path $repositoryRoot 'installer\Directory.Packages.props') -Raw
 Assert-Contract ($centralPackagesText -match 'WixToolset\.BootstrapperApplications\.wixext.+\[5\.0\.2\]' -and $centralPackagesText -match 'WixToolset\.Util\.wixext.+\[5\.0\.2\]') 'WiX extensions are not exactly pinned to 5.0.2.'
-$packagingText = (Get-Content -LiteralPath (Join-Path $repositoryRoot 'eng\package.ps1') -Raw) + (Get-Content -LiteralPath (Join-Path $repositoryRoot '.github\workflows\release.yml') -Raw)
+$packagingText = (Get-Content -LiteralPath (Join-Path $repositoryRoot 'eng\package.ps1') -Raw) + (Get-Content -LiteralPath (Join-Path $repositoryRoot '.github\workflows\release-candidate.yml') -Raw)
 Assert-Contract ($packagingText -notmatch 'WIX_OSMF_EULA_ACCEPTED|AcceptEula|WixEulaAcceptance') 'Obsolete WiX 7 OSMF acceptance coupling remains in packaging or release automation.'
 
 $appInstallDirectory = $appSource.Document.SelectSingleNode("//w:StandardDirectory[@Id='ProgramFiles64Folder']/w:Directory[@Id='AppInstallFolder' and @Name='Distraction Firewall']", $appSource.NamespaceManager)
@@ -433,6 +433,10 @@ Assert-Contract ($runtimeSource.Text -notmatch 'DnsTargetSnapshotComponent|Name=
 
 $seed = $runtimeSource.Document.SelectSingleNode("//w:Component[@Id='RuntimeInstallerSeedComponent']", $runtimeSource.NamespaceManager)
 Assert-Contract ($null -ne $seed -and $seed.GetAttribute('Bitness') -eq 'always64' -and $seed.GetAttribute('NeverOverwrite') -eq 'yes') 'Runtime installer seed must be 64-bit and preserve its first owner across repair/upgrade.'
+$runtimeSeedRegistryValues = @($seed.SelectNodes("w:RegistryValue", $runtimeSource.NamespaceManager))
+$appRuntimeSeedRegistryValues = @($appSource.Document.SelectNodes("//w:RegistryValue[@Key='SOFTWARE\Motoki0705\DistractionFirewall\Runtime']", $appSource.NamespaceManager))
+Assert-Contract ($runtimeSeedRegistryValues.Count -eq 3 -and @($runtimeSeedRegistryValues | Where-Object { $_.GetAttribute('Root') -ne 'HKLM' -or $_.GetAttribute('Key') -ne 'SOFTWARE\Motoki0705\DistractionFirewall\Runtime' }).Count -eq 0) 'Runtime installer seed values must be owned exclusively by the one Runtime HKLM component.'
+Assert-Contract ($appRuntimeSeedRegistryValues.Count -eq 0) 'App MSI source must not own or remove any Runtime installer seed value.'
 $ownerSeed = $seed.SelectSingleNode("w:RegistryValue[@Name='OwnerSid']", $runtimeSource.NamespaceManager)
 $instanceSeed = $seed.SelectSingleNode("w:RegistryValue[@Name='ProductInstanceId']", $runtimeSource.NamespaceManager)
 $dataRootSeed = $seed.SelectSingleNode("w:RegistryValue[@Name='DataRoot']", $runtimeSource.NamespaceManager)
@@ -508,9 +512,15 @@ try {
     Assert-Contract (@($shortcuts | Where-Object { (Get-LongMsiName $_.Name) -eq 'Distraction Firewall' }).Count -eq 1) 'App MSI shortcut table is missing the UI shortcut.'
 
     $registryRows = @(Get-MsiTableRows -Context $runtimeDatabase -Table 'Registry')
-    Assert-Contract (@($registryRows | Where-Object { $_.Root -eq '2' -and $_.Key -eq 'SOFTWARE\Motoki0705\DistractionFirewall\Runtime' -and $_.Name -eq 'OwnerSid' -and $_.Value -eq '[UserSID]' }).Count -eq 1) 'Runtime MSI Registry table lacks the 64-bit OwnerSid seed.'
-    Assert-Contract (@($registryRows | Where-Object { $_.Name -eq 'ProductInstanceId' -and $_.Value -eq 'Motoki0705.DistractionFirewall.Runtime.v1' }).Count -eq 1) 'Runtime MSI Registry table lacks ProductInstanceId.'
-    Assert-Contract (@($registryRows | Where-Object { $_.Name -eq 'DataRoot' -and $_.Value -eq '[RuntimeDataFolder]' }).Count -eq 1) 'Runtime MSI Registry table lacks the fixed DataRoot value.'
+    $runtimeSeedRows = @($registryRows | Where-Object { $_.Root -eq '2' -and $_.Key -eq 'SOFTWARE\Motoki0705\DistractionFirewall\Runtime' })
+    Assert-Contract ($runtimeSeedRows.Count -eq 3 -and @($runtimeSeedRows | Where-Object { $_.Component_ -ne 'RuntimeInstallerSeedComponent' }).Count -eq 0) 'Runtime MSI seed registry rows must be owned only by RuntimeInstallerSeedComponent.'
+    Assert-Contract (@($runtimeSeedRows | Where-Object { $_.Name -eq 'OwnerSid' -and $_.Value -eq '[UserSID]' }).Count -eq 1) 'Runtime MSI Registry table lacks the 64-bit OwnerSid seed.'
+    Assert-Contract (@($runtimeSeedRows | Where-Object { $_.Name -eq 'ProductInstanceId' -and $_.Value -eq 'Motoki0705.DistractionFirewall.Runtime.v1' }).Count -eq 1) 'Runtime MSI Registry table lacks ProductInstanceId.'
+    Assert-Contract (@($runtimeSeedRows | Where-Object { $_.Name -eq 'DataRoot' -and $_.Value -eq '[RuntimeDataFolder]' }).Count -eq 1) 'Runtime MSI Registry table lacks the fixed DataRoot value.'
+    if ($appTables -contains 'Registry') {
+        $appRegistryRows = @(Get-MsiTableRows -Context $appDatabase -Table 'Registry')
+        Assert-Contract (@($appRegistryRows | Where-Object { $_.Key -eq 'SOFTWARE\Motoki0705\DistractionFirewall\Runtime' }).Count -eq 0) 'App MSI database must not own or remove the Runtime installer seed.'
+    }
     $components = @(Get-MsiTableRows -Context $runtimeDatabase -Table 'Component')
     $seedComponent = @($components | Where-Object { $_.Component -eq 'RuntimeInstallerSeedComponent' })
     Assert-Contract ($seedComponent.Count -eq 1 -and (([int]$seedComponent[0].Attributes -band 0x180) -eq 0x180)) 'Runtime seed component is not both 64-bit and NeverOverwrite.'
@@ -583,12 +593,13 @@ try {
     $guardSequenceRow = @($executeSequence | Where-Object Action -eq 'GuardRuntimeMutation')
     $cleanupSequenceRow = @($executeSequence | Where-Object Action -eq 'CleanupRuntimeInstallation')
     $deleteServicesSequence = [int](@($executeSequence | Where-Object Action -eq 'DeleteServices')[0].Sequence)
+    $removeRegistryValuesSequence = [int](@($executeSequence | Where-Object Action -eq 'RemoveRegistryValues')[0].Sequence)
     $removeFilesSequence = [int](@($executeSequence | Where-Object Action -eq 'RemoveFiles')[0].Sequence)
     Assert-Contract ($guardSequenceRow.Count -eq 1 -and $guardSequenceRow[0].Condition -eq 'Installed AND (REMOVE~="ALL" OR REINSTALL OR PATCH)') 'Runtime mutation guard execute-sequence condition is missing or too broad.'
     Assert-Contract ($cleanupSequenceRow.Count -eq 1 -and $cleanupSequenceRow[0].Condition -eq 'Installed AND REMOVE~="ALL"') 'Runtime installation cleanup execute-sequence condition is missing or too broad.'
     $guardSequence = [int]$guardSequenceRow[0].Sequence
     $cleanupSequence = [int]$cleanupSequenceRow[0].Sequence
-    Assert-Contract ($stopServicesSequence -lt $guardSequence -and $guardSequence -lt $cleanupSequence -and $cleanupSequence -lt $deleteServicesSequence -and $deleteServicesSequence -lt $removeFilesSequence) 'Runtime guard and owned-object cleanup must run after StopServices and before DeleteServices/RemoveFiles.'
+    Assert-Contract ($stopServicesSequence -lt $guardSequence -and $guardSequence -lt $cleanupSequence -and $cleanupSequence -lt $deleteServicesSequence -and $cleanupSequence -lt $removeRegistryValuesSequence -and $deleteServicesSequence -lt $removeFilesSequence) 'Runtime guard and owned-object cleanup must run after StopServices and before DeleteServices/RemoveRegistryValues/RemoveFiles so a checked cleanup failure preserves its diagnostic and MSI-owned seed through rollback.'
 }
 finally {
     Close-MsiDatabase -Context $runtimeDatabase

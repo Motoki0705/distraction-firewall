@@ -1,0 +1,863 @@
+name: Release candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Candidate SemVer without a v prefix (for example 0.1.0-alpha.2)
+        required: true
+        type: string
+      source_commit:
+        description: Exact lowercase 40-character protected-main commit to build once
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-candidate-${{ inputs.source_commit }}-${{ inputs.version }}
+  cancel-in-progress: false
+
+env:
+  DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+  DOTNET_NOLOGO: '1'
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: '1'
+
+jobs:
+  candidate-gate:
+    name: Candidate / protected-main gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      artifact_name: ${{ steps.gate.outputs.artifact_name }}
+      is_prerelease: ${{ steps.gate.outputs.is_prerelease }}
+      source_sha: ${{ steps.gate.outputs.source_sha }}
+      version: ${{ steps.gate.outputs.version }}
+    steps:
+      - name: Validate exact protected-main commit before checkout
+        id: gate
+        shell: pwsh
+        env:
+          API_URL: ${{ github.api_url }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          DISPATCH_REF: ${{ github.ref }}
+          DISPATCH_SHA: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_SHA: ${{ inputs.source_commit }}
+          REQUESTED_VERSION: ${{ inputs.version }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+
+          $strictVersionPattern = '^(?<version>(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*|[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9][0-9]*|[A-Za-z-][0-9A-Za-z-]*))*)?)$'
+          if ($env:DEFAULT_BRANCH -cne 'main' -or $env:DISPATCH_REF -cne 'refs/heads/main') {
+            throw 'Release candidates must be dispatched from the protected main branch.'
+          }
+          if ($env:REQUESTED_SHA -cnotmatch '^[0-9a-f]{40}$' -or
+              $env:DISPATCH_SHA -cnotmatch '^[0-9a-f]{40}$' -or
+              $env:REQUESTED_SHA -cne $env:DISPATCH_SHA) {
+            throw 'source_commit must exactly match the lowercase workflow-dispatch commit.'
+          }
+          $requestedVersion = [string]$env:REQUESTED_VERSION
+          $versionMatch = [regex]::Match($requestedVersion, $strictVersionPattern)
+          if (-not $versionMatch.Success -or
+              $versionMatch.Index -ne 0 -or
+              $versionMatch.Length -ne $requestedVersion.Length) {
+            throw 'version must be strict SemVer without a v prefix or build metadata.'
+          }
+
+          $headers = @{
+            Accept = 'application/vnd.github+json'
+            Authorization = "Bearer $env:GH_TOKEN"
+            'X-GitHub-Api-Version' = '2022-11-28'
+          }
+          $uri = "$($env:API_URL.TrimEnd('/'))/repos/$env:REPOSITORY/branches/main"
+          try {
+            $branch = Invoke-RestMethod -Method Get -Uri $uri -Headers $headers -ErrorAction Stop
+          }
+          catch {
+            throw 'GitHub API validation of the protected main branch failed.'
+          }
+
+          $mainSha = ([string]$branch.commit.sha).ToLowerInvariant()
+          if ([string]$branch.name -cne 'main' -or -not [bool]$branch.protected) {
+            throw 'GitHub API did not return the expected protected main branch.'
+          }
+          if ($mainSha -cnotmatch '^[0-9a-f]{40}$' -or $mainSha -cne $env:REQUESTED_SHA) {
+            throw 'source_commit is not the exact current protected main commit.'
+          }
+
+          $version = $env:REQUESTED_VERSION
+          $artifactName = "release-candidate-$version-$mainSha-$env:RUN_ID-$env:RUN_ATTEMPT"
+          "artifact_name=$artifactName" >> $env:GITHUB_OUTPUT
+          "is_prerelease=$($version.Contains('-').ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+          "source_sha=$mainSha" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+  test:
+    name: Candidate / test
+    needs: candidate-gate
+    runs-on: windows-2025
+    timeout-minutes: 30
+    outputs:
+      version: ${{ needs.candidate-gate.outputs.version }}
+      is_prerelease: ${{ needs.candidate-gate.outputs.is_prerelease }}
+      source_sha: ${{ needs.candidate-gate.outputs.source_sha }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out validated source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.candidate-gate.outputs.source_sha }}
+
+      - name: Verify checked-out commit identity
+        env:
+          EXPECTED_COMMIT: ${{ needs.candidate-gate.outputs.source_sha }}
+        run: |
+          if ((git rev-parse HEAD).Trim().ToLowerInvariant() -cne $env:EXPECTED_COMMIT) {
+            throw 'Checkout did not resolve to the validated protected-main commit.'
+          }
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 10.0.302
+
+      - name: Restore locked dependencies
+        run: ./eng/restore.ps1
+
+      - name: Verify formatting
+        run: ./eng/format.ps1
+
+      - name: Build
+        run: ./eng/build.ps1 -Configuration Release
+
+      - name: Test
+        run: ./eng/test.ps1 -Configuration Release -ResultsDirectory '${{ runner.temp }}\distraction-firewall-release-test-results'
+
+      - name: Upload test results
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-test-results-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}\distraction-firewall-release-test-results\*.trx
+          if-no-files-found: warn
+          retention-days: 14
+
+  publish:
+    name: Candidate / publish win-x64
+    needs: test
+    runs-on: windows-2025
+    timeout-minutes: 35
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.test.outputs.source_sha }}
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 10.0.302
+
+      - name: Publish application and runtime payloads
+        env:
+          PACKAGE_VERSION: ${{ needs.test.outputs.version }}
+        run: |
+          $publishItems = @(
+            [pscustomobject]@{ Project = 'DistractionFirewall.App'; SelfContained = $true },
+            [pscustomobject]@{ Project = 'DistractionFirewall.Cli'; SelfContained = $true },
+            [pscustomobject]@{ Project = 'DistractionFirewall.ActivationService'; SelfContained = $true },
+            [pscustomobject]@{ Project = 'DistractionFirewall.LeaseWorker'; SelfContained = $true },
+            [pscustomobject]@{ Project = 'DistractionFirewall.DnsFilter'; SelfContained = $true },
+            [pscustomobject]@{ Project = 'DistractionFirewall.Finalizer'; SelfContained = $true },
+            [pscustomobject]@{ Project = 'DistractionFirewall.Enforcement.Windows'; SelfContained = $false }
+          )
+
+          foreach ($item in $publishItems) {
+            $projectPath = "src/$($item.Project)/$($item.Project).csproj"
+            $outputPath = "artifacts/publish/$($item.Project)/win-x64"
+            $selfContained = $item.SelfContained.ToString().ToLowerInvariant()
+
+            dotnet restore $projectPath --locked-mode --runtime win-x64 --nologo
+            if ($LASTEXITCODE -ne 0) {
+              throw "Locked restore failed for $($item.Project)."
+            }
+
+            dotnet publish $projectPath `
+              --configuration Release `
+              --runtime win-x64 `
+              --self-contained $selfContained `
+              --no-restore `
+              --nologo `
+              --output $outputPath `
+              -p:Version=$env:PACKAGE_VERSION `
+              -p:ContinuousIntegrationBuild=true `
+              -p:DebugType=None `
+              -p:DebugSymbols=false
+            if ($LASTEXITCODE -ne 0) {
+              throw "Publish failed for $($item.Project)."
+            }
+          }
+
+      - name: Upload publish inputs
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: publish-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/publish
+          if-no-files-found: error
+          retention-days: 3
+
+  package:
+    name: Candidate / package
+    needs:
+      - test
+      - publish
+    runs-on: windows-2025
+    timeout-minutes: 30
+    environment:
+      name: ${{ vars.WINDOWS_SIGNING_CONFIGURED == 'true' && 'release-signing' || '' }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.test.outputs.source_sha }}
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 10.0.302
+
+      - name: Download publish inputs
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: publish-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/publish
+
+      - name: Provision signing certificate
+        id: signing_certificate
+        if: ${{ vars.WINDOWS_SIGNING_CONFIGURED == 'true' }}
+        env:
+          SIGNING_PFX_BASE64: ${{ secrets.WINDOWS_SIGNING_PFX_BASE64 }}
+          SIGNING_PFX_PASSWORD: ${{ secrets.WINDOWS_SIGNING_PFX_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:SIGNING_PFX_BASE64) -or
+              [string]::IsNullOrWhiteSpace($env:SIGNING_PFX_PASSWORD)) {
+            throw 'Signing is enabled, but WINDOWS_SIGNING_PFX_BASE64 or WINDOWS_SIGNING_PFX_PASSWORD is absent.'
+          }
+
+          $pfxPath = Join-Path $env:RUNNER_TEMP 'distraction-firewall-signing.pfx'
+          try {
+            [System.IO.File]::WriteAllBytes(
+              $pfxPath,
+              [Convert]::FromBase64String($env:SIGNING_PFX_BASE64)
+            )
+            $password = ConvertTo-SecureString $env:SIGNING_PFX_PASSWORD -AsPlainText -Force
+            $imported = @(
+              Import-PfxCertificate `
+                -FilePath $pfxPath `
+                -CertStoreLocation Cert:\CurrentUser\My `
+                -Password $password `
+                -Exportable:$false
+            )
+            $signingCertificate = $imported |
+              Where-Object HasPrivateKey |
+              Sort-Object NotAfter -Descending |
+              Select-Object -First 1
+            if ($null -eq $signingCertificate) {
+              throw 'The PFX did not import a certificate with a private key.'
+            }
+            "thumbprint=$($signingCertificate.Thumbprint)" >> $env:GITHUB_OUTPUT
+          }
+          finally {
+            if (Test-Path -LiteralPath $pfxPath -PathType Leaf) {
+              Remove-Item -LiteralPath $pfxPath -Force
+            }
+          }
+
+      - name: Build and verify installers
+        env:
+          PACKAGE_VERSION: ${{ needs.test.outputs.version }}
+          SIGNING_CONFIGURED: ${{ vars.WINDOWS_SIGNING_CONFIGURED }}
+          DF_SIGNING_CERTIFICATE_THUMBPRINT: ${{ steps.signing_certificate.outputs.thumbprint }}
+          DF_SIGNING_TIMESTAMP_URL: ${{ vars.WINDOWS_SIGNING_TIMESTAMP_URL }}
+        run: |
+          $packageArguments = @{
+            Version = $env:PACKAGE_VERSION
+          }
+          if ($env:SIGNING_CONFIGURED -eq 'true') {
+            $packageArguments.SigningConfigured = $true
+          }
+          ./eng/package.ps1 @packageArguments
+
+      - name: Remove signing certificate
+        if: ${{ always() && vars.WINDOWS_SIGNING_CONFIGURED == 'true' }}
+        env:
+          SIGNING_CERTIFICATE_THUMBPRINT: ${{ steps.signing_certificate.outputs.thumbprint }}
+        run: |
+          if ($env:SIGNING_CERTIFICATE_THUMBPRINT -match '^[0-9A-Fa-f]{40}$') {
+            $certificatePath = "Cert:\CurrentUser\My\$env:SIGNING_CERTIFICATE_THUMBPRINT"
+            if (Test-Path -LiteralPath $certificatePath) {
+              Remove-Item -LiteralPath $certificatePath -Force
+            }
+          }
+
+      - name: Upload installers
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: installers-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            artifacts/package/*.msi
+            artifacts/package/*.exe
+          if-no-files-found: error
+          retention-days: 3
+
+  installer-validation:
+    name: Candidate / hosted installer contract
+    needs:
+      - test
+      - package
+    runs-on: windows-2025
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.test.outputs.source_sha }}
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 10.0.302
+
+      - name: Restore pinned WiX verification CLI
+        run: dotnet restore installer/Bundle/DistractionFirewall.Bundle.wixproj --locked-mode --nologo
+
+      - name: Download installers
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: installers-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/package
+
+      - name: Verify MSI tables, administrative images, and Burn attached payloads
+        env:
+          PACKAGE_VERSION: ${{ needs.test.outputs.version }}
+          IS_PRERELEASE: ${{ needs.test.outputs.is_prerelease }}
+        run: |
+          $verifyArguments = @{
+            Version = $env:PACKAGE_VERSION
+          }
+          if ($env:IS_PRERELEASE -ne 'true') {
+            $verifyArguments.RequireSigning = $true
+            $verifyArguments.RequireDeferredActiveUninstall = $true
+          }
+          ./eng/verify-installer.ps1 @verifyArguments
+
+  supply-chain:
+    name: Candidate / checksum and SBOM skeleton
+    needs:
+      - test
+      - installer-validation
+    runs-on: windows-2025
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.test.outputs.source_sha }}
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          dotnet-version: 10.0.302
+
+      - name: Restore pinned WiX verification CLI
+        run: dotnet restore installer/Bundle/DistractionFirewall.Bundle.wixproj --locked-mode --nologo
+
+      - name: Download installers
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: installers-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/package
+
+      - name: Generate and verify release metadata
+        env:
+          PACKAGE_VERSION: ${{ needs.test.outputs.version }}
+          IS_PRERELEASE: ${{ needs.test.outputs.is_prerelease }}
+        run: |
+          $verifyArguments = @{
+            Version = $env:PACKAGE_VERSION
+            GenerateMetadata = $true
+          }
+          if ($env:IS_PRERELEASE -ne 'true') {
+            $verifyArguments.RequireSigning = $true
+            $verifyArguments.RequireDeferredActiveUninstall = $true
+          }
+          ./eng/verify-release.ps1 @verifyArguments
+
+      - name: Create build-once candidate manifest and hosted evidence
+        env:
+          IS_PRERELEASE: ${{ needs.test.outputs.is_prerelease }}
+          PACKAGE_VERSION: ${{ needs.test.outputs.version }}
+          SOURCE_SHA: ${{ needs.test.outputs.source_sha }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          $packageDirectory = Join-Path $PWD 'artifacts\package'
+          $setupName = "distraction-firewall-setup-$env:PACKAGE_VERSION-win-x64.exe"
+          $appName = "distraction-firewall-app-$env:PACKAGE_VERSION-win-x64.msi"
+          $runtimeName = "distraction-firewall-runtime-$env:PACKAGE_VERSION-win-x64.msi"
+          $checksumName = "distraction-firewall-$env:PACKAGE_VERSION.sha256"
+          $sbomName = "distraction-firewall-$env:PACKAGE_VERSION.spdx.json"
+          $manifestName = "distraction-firewall-$env:PACKAGE_VERSION.candidate-manifest.json"
+          $evidenceName = "distraction-firewall-$env:PACKAGE_VERSION.hosted-evidence.json"
+          $subjectsName = "distraction-firewall-$env:PACKAGE_VERSION.candidate-subjects.sha256"
+          $utf8NoBom = [Text.UTF8Encoding]::new($false)
+
+          $verificationRoot = Join-Path $env:RUNNER_TEMP 'candidate-burn-metadata'
+          $baDirectory = Join-Path $verificationRoot 'ba'
+          $payloadDirectory = Join-Path $verificationRoot 'payload'
+          $intermediateDirectory = Join-Path $verificationRoot 'intermediate'
+          $null = New-Item -ItemType Directory -Path $baDirectory, $payloadDirectory, $intermediateDirectory -Force
+          $nugetRoot = if ([string]::IsNullOrWhiteSpace($env:NUGET_PACKAGES)) {
+            Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)) '.nuget\packages'
+          } else {
+            $env:NUGET_PACKAGES
+          }
+          $wixCli = Join-Path $nugetRoot 'wixtoolset.sdk\5.0.2\tools\net6.0\wix.dll'
+          if (-not (Test-Path -LiteralPath $wixCli -PathType Leaf)) {
+            throw 'The pinned WiX CLI is unavailable for candidate identity extraction.'
+          }
+          dotnet $wixCli burn extract (Join-Path $packageDirectory $setupName) `
+            -o $payloadDirectory -oba $baDirectory -intermediateFolder $intermediateDirectory
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Burn identity extraction failed.'
+          }
+          $burnEnginePath = Join-Path $verificationRoot 'burn-engine.exe'
+          dotnet $wixCli burn detach (Join-Path $packageDirectory $setupName) `
+            -engine $burnEnginePath -intermediateFolder $intermediateDirectory
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $burnEnginePath -PathType Leaf)) {
+            throw 'Burn engine fingerprint extraction failed.'
+          }
+
+          [xml]$burn = [IO.File]::ReadAllText((Join-Path $baDirectory 'manifest.xml'))
+          $namespace = [Xml.XmlNamespaceManager]::new($burn.NameTable)
+          $namespace.AddNamespace('b', 'http://wixtoolset.org/schemas/v4/2008/Burn')
+          $registration = $burn.SelectSingleNode('/b:BurnManifest/b:Registration', $namespace)
+          $relatedBundle = $burn.SelectSingleNode('/b:BurnManifest/b:RelatedBundle', $namespace)
+          $runtimePackage = $burn.SelectSingleNode('/b:BurnManifest/b:Chain/b:MsiPackage[@Id="RuntimeMsi"]', $namespace)
+          $appPackage = $burn.SelectSingleNode('/b:BurnManifest/b:Chain/b:MsiPackage[@Id="AppMsi"]', $namespace)
+          if ($null -eq $registration -or $null -eq $relatedBundle -or
+              $null -eq $runtimePackage -or $null -eq $appPackage) {
+            throw 'The Burn manifest does not contain the expected registration and MSI identities.'
+          }
+          $guidPattern = '^\{[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}\}$'
+          $identityValues = @(
+            $registration.GetAttribute('Id'), $registration.GetAttribute('ProviderKey'),
+            $relatedBundle.GetAttribute('Id'), $runtimePackage.GetAttribute('ProductCode'),
+            $runtimePackage.GetAttribute('UpgradeCode'), $appPackage.GetAttribute('ProductCode'),
+            $appPackage.GetAttribute('UpgradeCode')
+          )
+          if (@($identityValues | Where-Object { $_ -cnotmatch $guidPattern }).Count -ne 0 -or
+              $registration.GetAttribute('Id') -cne $registration.GetAttribute('ProviderKey')) {
+            throw 'A candidate installer identity is malformed or internally inconsistent.'
+          }
+
+          function Get-MsiIdentity {
+            param([Parameter(Mandatory)][string]$Path)
+
+            $installer = New-Object -ComObject WindowsInstaller.Installer
+            $database = $null
+            try {
+              $database = $installer.OpenDatabase($Path, 0)
+              $properties = [ordered]@{}
+              $quote = [char]96
+              foreach ($propertyName in @('ProductCode', 'UpgradeCode', 'ProductVersion')) {
+                $query = "SELECT ${quote}Value${quote} FROM ${quote}Property${quote} WHERE ${quote}Property${quote}='$propertyName'"
+                $view = $database.OpenView($query)
+                try {
+                  $null = $view.Execute()
+                  $record = $view.Fetch()
+                  if ($null -eq $record) {
+                    throw "MSI Property '$propertyName' is missing."
+                  }
+                  try {
+                    $properties[$propertyName] = [string]$record.StringData(1)
+                  }
+                  finally {
+                    [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($record)
+                  }
+                }
+                finally {
+                  $null = $view.Close()
+                  [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($view)
+                }
+              }
+              $summary = $database.SummaryInformation(0)
+              try {
+                $packageCode = [string]$summary.Property(9)
+              }
+              finally {
+                [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($summary)
+              }
+              return [pscustomobject][ordered]@{
+                productCode = $properties.ProductCode.ToUpperInvariant()
+                packageCode = $packageCode.ToUpperInvariant()
+                upgradeCode = $properties.UpgradeCode.ToUpperInvariant()
+                productVersion = $properties.ProductVersion
+              }
+            }
+            finally {
+              if ($null -ne $database) {
+                [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($database)
+              }
+              [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($installer)
+            }
+          }
+
+          function Get-AuthenticodeStatus {
+            param([Parameter(Mandatory)][string]$Path)
+
+            $status = (Get-AuthenticodeSignature -LiteralPath $Path).Status.ToString()
+            if ($status -cnotin @('Valid', 'NotSigned')) {
+              throw "Unsupported Authenticode status '$status': $Path"
+            }
+            return $status
+          }
+
+          function Get-ArtifactRecord {
+            param(
+              [Parameter(Mandatory)][string]$FileName,
+              [hashtable]$Identity = @{}
+            )
+
+            $path = Join-Path $packageDirectory $FileName
+            $file = Get-Item -LiteralPath $path -ErrorAction Stop
+            $record = [ordered]@{
+              fileName = $file.Name
+              sha256 = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+              sizeBytes = $file.Length
+            }
+            foreach ($key in $Identity.Keys) {
+              $record[$key] = $Identity[$key]
+            }
+            return $record
+          }
+
+          $setupPath = Join-Path $packageDirectory $setupName
+          $appPath = Join-Path $packageDirectory $appName
+          $runtimePath = Join-Path $packageDirectory $runtimeName
+          $appIdentity = Get-MsiIdentity -Path $appPath
+          $runtimeIdentity = Get-MsiIdentity -Path $runtimePath
+          if ($appIdentity.productCode -cne $appPackage.GetAttribute('ProductCode') -or
+              $appIdentity.upgradeCode -cne $appPackage.GetAttribute('UpgradeCode') -or
+              $appIdentity.productVersion -cne $appPackage.GetAttribute('Version') -or
+              $runtimeIdentity.productCode -cne $runtimePackage.GetAttribute('ProductCode') -or
+              $runtimeIdentity.upgradeCode -cne $runtimePackage.GetAttribute('UpgradeCode') -or
+              $runtimeIdentity.productVersion -cne $runtimePackage.GetAttribute('Version')) {
+            throw 'The standalone MSI identities differ from the attached Burn package identities.'
+          }
+          $setupAuthenticode = Get-AuthenticodeStatus -Path $setupPath
+          $appAuthenticode = Get-AuthenticodeStatus -Path $appPath
+          $runtimeAuthenticode = Get-AuthenticodeStatus -Path $runtimePath
+          $validOuterCount = @(
+            @($setupAuthenticode, $appAuthenticode, $runtimeAuthenticode) |
+              Where-Object { $_ -ceq 'Valid' }
+          ).Count
+          if ($validOuterCount -notin @(0, 3)) {
+            throw 'Outer-package signing is partial; all three packages must be Valid or all three must be NotSigned.'
+          }
+
+          $manifest = [ordered]@{
+            schema = 'distraction-firewall/build-once-candidate/v1'
+            version = $env:PACKAGE_VERSION
+            source = [ordered]@{
+              repository = $env:GITHUB_REPOSITORY
+              commitSha = $env:SOURCE_SHA
+              ref = 'refs/heads/main'
+              workflowPath = '.github/workflows/release-candidate.yml'
+              workflowRef = $env:WORKFLOW_REF
+              workflowRunId = [long]$env:GITHUB_RUN_ID
+              workflowRunAttempt = [int]$env:GITHUB_RUN_ATTEMPT
+              artifactId = $null
+              artifactDigestSha256 = $null
+            }
+            artifacts = [ordered]@{
+              setupExe = Get-ArtifactRecord -FileName $setupName -Identity @{
+                authenticodeStatus = $setupAuthenticode
+                bundleProviderKey = $registration.GetAttribute('ProviderKey')
+                bundleUpgradeCode = $relatedBundle.GetAttribute('Id')
+                burnEngine = [ordered]@{
+                  sizeBytes = (Get-Item -LiteralPath $burnEnginePath).Length
+                  sha256 = (Get-FileHash -LiteralPath $burnEnginePath -Algorithm SHA256).Hash.ToLowerInvariant()
+                }
+              }
+              appMsi = Get-ArtifactRecord -FileName $appName -Identity @{
+                authenticodeStatus = $appAuthenticode
+                productCode = $appIdentity.productCode
+                packageCode = $appIdentity.packageCode
+                upgradeCode = $appIdentity.upgradeCode
+                productVersion = $appIdentity.productVersion
+              }
+              runtimeMsi = Get-ArtifactRecord -FileName $runtimeName -Identity @{
+                authenticodeStatus = $runtimeAuthenticode
+                productCode = $runtimeIdentity.productCode
+                packageCode = $runtimeIdentity.packageCode
+                upgradeCode = $runtimeIdentity.upgradeCode
+                productVersion = $runtimeIdentity.productVersion
+              }
+              checksum = Get-ArtifactRecord -FileName $checksumName
+              sbom = Get-ArtifactRecord -FileName $sbomName
+            }
+            signing = [ordered]@{
+              configured = $validOuterCount -eq 3
+              outerPackageStatuses = [ordered]@{
+                setupExe = $setupAuthenticode
+                appMsi = $appAuthenticode
+                runtimeMsi = $runtimeAuthenticode
+              }
+              disclosure = if ($validOuterCount -ne 3) {
+                'Unsigned candidate: one or more outer packages are not Authenticode-signed. Inner PE payloads are not claimed signed.'
+              } else {
+                'Stable candidates require verified outer-package Authenticode signatures; inner-payload coverage remains separately documented.'
+              }
+            }
+          }
+          $manifestPath = Join-Path $packageDirectory $manifestName
+          [IO.File]::WriteAllText(
+            $manifestPath,
+            (($manifest | ConvertTo-Json -Depth 12) + [Environment]::NewLine),
+            $utf8NoBom
+          )
+          $manifestSha256 = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+
+          $hostedEvidence = [ordered]@{
+            schema = 'distraction-firewall/hosted-candidate-validation/v1'
+            result = 'passed'
+            candidateManifestSha256 = $manifestSha256
+            sourceCommitSha = $env:SOURCE_SHA
+            workflowRunId = [long]$env:GITHUB_RUN_ID
+            workflowRunAttempt = [int]$env:GITHUB_RUN_ATTEMPT
+            checks = @(
+              'locked-restore', 'format', 'release-build', 'automated-tests',
+              'hosted-installer-contract', 'burn-attached-payload-hashes',
+              'release-checksums', 'spdx-distribution-inventory'
+            )
+            limitations = @(
+              'No active YouTube lease is started by hosted validation.',
+              'The SPDX document is a distribution inventory skeleton, not a complete dependency SBOM.',
+              'Windows 11 install/service/uninstall validation is attested separately after one-UAC local smoke.'
+            )
+          }
+          $evidencePath = Join-Path $packageDirectory $evidenceName
+          [IO.File]::WriteAllText(
+            $evidencePath,
+            (($hostedEvidence | ConvertTo-Json -Depth 10) + [Environment]::NewLine),
+            $utf8NoBom
+          )
+
+          $subjectPaths = @(
+            $setupName, $appName, $runtimeName, $checksumName, $sbomName,
+            $manifestName, $evidenceName
+          ) | ForEach-Object { Join-Path $packageDirectory $_ }
+          $subjectLines = @(
+            $subjectPaths |
+              Sort-Object { [IO.Path]::GetFileName($_) } |
+              ForEach-Object {
+                $hash = (Get-FileHash -LiteralPath $_ -Algorithm SHA256).Hash.ToLowerInvariant()
+                "$hash  $([IO.Path]::GetFileName($_))"
+              }
+          )
+          [IO.File]::WriteAllLines((Join-Path $packageDirectory $subjectsName), $subjectLines, $utf8NoBom)
+
+      - name: Upload unsealed candidate payload
+        id: unsealed_payload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: unsealed-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            artifacts/package/*.msi
+            artifacts/package/*.exe
+            artifacts/package/*.sha256
+            artifacts/package/*.json
+          if-no-files-found: error
+          retention-days: 1
+
+  seal-candidate:
+    name: Candidate / seal immutable artifact
+    needs:
+      - candidate-gate
+      - test
+      - supply-chain
+    runs-on: windows-2025
+    timeout-minutes: 15
+    permissions:
+      artifact-metadata: write
+      attestations: write
+      contents: read
+      id-token: write
+    outputs:
+      artifact_digest: ${{ steps.receipt.outputs.artifact_digest }}
+      artifact_id: ${{ steps.candidate_upload.outputs.artifact-id }}
+      artifact_name: ${{ needs.candidate-gate.outputs.artifact_name }}
+      manifest_sha256: ${{ steps.verify.outputs.manifest_sha256 }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Download validated unsealed payload
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: unsealed-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/candidate
+
+      - name: Verify candidate manifest and subject checksums
+        id: verify
+        env:
+          EXPECTED_WORKFLOW_REF: ${{ github.repository }}/.github/workflows/release-candidate.yml@refs/heads/main
+          PACKAGE_VERSION: ${{ needs.test.outputs.version }}
+          SOURCE_SHA: ${{ needs.test.outputs.source_sha }}
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          $candidateDirectory = Join-Path $PWD 'artifacts\candidate'
+          $manifestPath = Join-Path $candidateDirectory "distraction-firewall-$env:PACKAGE_VERSION.candidate-manifest.json"
+          $subjectsPath = Join-Path $candidateDirectory "distraction-firewall-$env:PACKAGE_VERSION.candidate-subjects.sha256"
+          $manifest = [IO.File]::ReadAllText($manifestPath) | ConvertFrom-Json
+          if ($manifest.schema -cne 'distraction-firewall/build-once-candidate/v1' -or
+              $manifest.version -cne $env:PACKAGE_VERSION -or
+              $manifest.source.repository -cne $env:GITHUB_REPOSITORY -or
+              $manifest.source.commitSha -cne $env:SOURCE_SHA -or
+              $manifest.source.ref -cne 'refs/heads/main' -or
+              $manifest.source.workflowPath -cne '.github/workflows/release-candidate.yml' -or
+              $manifest.source.workflowRef -cne $env:EXPECTED_WORKFLOW_REF -or
+              $manifest.source.workflowRunId -ne [long]$env:GITHUB_RUN_ID -or
+              $manifest.source.workflowRunAttempt -ne [int]$env:GITHUB_RUN_ATTEMPT -or
+              $null -ne $manifest.source.artifactId -or
+              $null -ne $manifest.source.artifactDigestSha256) {
+            throw 'The candidate manifest does not bind exactly to this build-once run.'
+          }
+
+          $expectedNames = @(
+            "distraction-firewall-setup-$env:PACKAGE_VERSION-win-x64.exe",
+            "distraction-firewall-app-$env:PACKAGE_VERSION-win-x64.msi",
+            "distraction-firewall-runtime-$env:PACKAGE_VERSION-win-x64.msi",
+            "distraction-firewall-$env:PACKAGE_VERSION.sha256",
+            "distraction-firewall-$env:PACKAGE_VERSION.spdx.json",
+            "distraction-firewall-$env:PACKAGE_VERSION.candidate-manifest.json",
+            "distraction-firewall-$env:PACKAGE_VERSION.hosted-evidence.json"
+          ) | Sort-Object
+          $actualNames = @()
+          foreach ($line in [IO.File]::ReadAllLines($subjectsPath)) {
+            if ($line -cnotmatch '^(?<hash>[0-9a-f]{64})  (?<name>[^\\/]+)$') {
+              throw "Malformed candidate subject checksum line: $line"
+            }
+            $actualNames += $Matches['name']
+            $path = Join-Path $candidateDirectory $Matches['name']
+            $actualHash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actualHash -cne $Matches['hash']) {
+              throw "Candidate subject hash mismatch: $($Matches['name'])"
+            }
+          }
+          if (Compare-Object -ReferenceObject $expectedNames -DifferenceObject ($actualNames | Sort-Object)) {
+            throw 'The candidate subject inventory is incomplete or contains an unexpected file.'
+          }
+          $allNames = @(Get-ChildItem -LiteralPath $candidateDirectory -File | Select-Object -ExpandProperty Name | Sort-Object)
+          $expectedUnsealedNames = @(
+            $expectedNames
+            "distraction-firewall-$env:PACKAGE_VERSION.candidate-subjects.sha256"
+          ) | Sort-Object
+          if (Compare-Object -ReferenceObject $expectedUnsealedNames -DifferenceObject $allNames) {
+            throw 'The unsealed candidate artifact contains an unexpected file.'
+          }
+          $manifestSha256 = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          "manifest_sha256=$manifestSha256" >> $env:GITHUB_OUTPUT
+
+      - name: Generate GitHub build-provenance attestation
+        id: provenance
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-checksums: artifacts/candidate/distraction-firewall-${{ needs.test.outputs.version }}.candidate-subjects.sha256
+
+      - name: Add offline-verifiable provenance bundle
+        env:
+          BUNDLE_PATH: ${{ steps.provenance.outputs.bundle-path }}
+          PACKAGE_VERSION: ${{ needs.test.outputs.version }}
+        run: |
+          if (-not (Test-Path -LiteralPath $env:BUNDLE_PATH -PathType Leaf)) {
+            throw 'actions/attest did not produce a provenance bundle.'
+          }
+          $destination = Join-Path $PWD "artifacts\candidate\distraction-firewall-$env:PACKAGE_VERSION.provenance.bundle.json"
+          Copy-Item -LiteralPath $env:BUNDLE_PATH -Destination $destination
+
+      - name: Upload immutable build-once candidate
+        id: candidate_upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ needs.candidate-gate.outputs.artifact_name }}
+          path: |
+            artifacts/candidate/*.msi
+            artifacts/candidate/*.exe
+            artifacts/candidate/*.sha256
+            artifacts/candidate/*.json
+          compression-level: 0
+          if-no-files-found: error
+          include-hidden-files: false
+          overwrite: false
+          retention-days: 90
+
+      - name: Publish candidate receipt to the run summary
+        id: receipt
+        env:
+          ARTIFACT_DIGEST_HEX: ${{ steps.candidate_upload.outputs.artifact-digest }}
+          ARTIFACT_ID: ${{ steps.candidate_upload.outputs.artifact-id }}
+          ARTIFACT_NAME: ${{ needs.candidate-gate.outputs.artifact_name }}
+          MANIFEST_SHA256: ${{ steps.verify.outputs.manifest_sha256 }}
+          SOURCE_SHA: ${{ needs.test.outputs.source_sha }}
+        run: |
+          if ($env:ARTIFACT_ID -cnotmatch '^[1-9][0-9]*$' -or
+              $env:ARTIFACT_DIGEST_HEX -cnotmatch '^[0-9a-f]{64}$' -or
+              $env:MANIFEST_SHA256 -cnotmatch '^[0-9a-f]{64}$') {
+            throw 'The immutable candidate receipt is incomplete.'
+          }
+          # upload-artifact emits a bare SHA-256 hex value, while the REST API
+          # exposes the same archive digest in canonical sha256:<hex> form.
+          $artifactDigest = "sha256:$env:ARTIFACT_DIGEST_HEX"
+          "artifact_digest=$artifactDigest" >> $env:GITHUB_OUTPUT
+          @(
+            '## Build-once candidate receipt'
+            ''
+            "| source SHA | $env:SOURCE_SHA |"
+            "| artifact name | $env:ARTIFACT_NAME |"
+            "| artifact ID | $env:ARTIFACT_ID |"
+            "| artifact archive digest | $artifactDigest |"
+            "| candidate manifest SHA-256 | $env:MANIFEST_SHA256 |"
+            ''
+            'Download the artifact archive by ID, verify its archive digest and manifest, then run the one-UAC local smoke. Do not rebuild.'
+          ) | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY

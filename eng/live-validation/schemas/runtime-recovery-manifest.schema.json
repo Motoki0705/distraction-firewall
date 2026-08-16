@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Motoki0705/distraction-firewall/blob/main/eng/live-validation/schemas/runtime-recovery-manifest.schema.json",
+  "title": "Distraction Firewall exact Runtime recovery manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "incidentId", "approvedForMachineRecovery", "mode", "runtimeMsi", "expectedInstalled", "orphanBundleProviderKeys", "orphanPackageCaches"],
+  "properties": {
+    "schema": { "const": "distraction-firewall/runtime-recovery/v1" },
+    "incidentId": { "const": "pretag-alpha2-runtime-uninstall-1603" },
+    "approvedForMachineRecovery": { "const": true },
+    "mode": { "const": "repair_then_uninstall" },
+    "runtimeMsi": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fileName", "size", "sha256", "authenticodeStatus", "productCode", "packageCode", "upgradeCode", "productVersion"],
+      "properties": {
+        "fileName": { "const": "distraction-firewall-runtime-recovery-1b676614-win-x64.msi" },
+        "size": { "const": 86290721 },
+        "sha256": { "const": "ef35d8ccb1a110f70dd4f6a9989bbc2b30a0b2b467b4fdc380ce6973b83c50da" },
+        "authenticodeStatus": { "const": "NotSigned" },
+        "productCode": { "const": "{1B676614-3B1F-4646-9788-889C071DAAA0}" },
+        "packageCode": { "const": "{AD62973E-B6B1-49B6-961B-C3688C7B9C26}" },
+        "upgradeCode": { "const": "{275EC377-2EB2-487F-AD4B-BA0BA85C2FFB}" },
+        "productVersion": { "const": "0.1.0" }
+      }
+    },
+    "expectedInstalled": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["productCode", "packageCode", "productVersion", "localPackage"],
+      "properties": {
+        "productCode": { "const": "{1B676614-3B1F-4646-9788-889C071DAAA0}" },
+        "packageCode": { "const": "{11A25941-6631-4793-8AD7-753985510F77}" },
+        "productVersion": { "const": "0.1.0" },
+        "localPackage": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["sizeBytes", "sha256"],
+          "properties": {
+            "sizeBytes": { "const": 86282518 },
+            "sha256": { "const": "b9a94e0a2dbdc40ba3b0996fc5a304bf153d1e3e30ef8e0e7d420844bd300dfe" }
+          }
+        }
+      }
+    },
+    "orphanBundleProviderKeys": {
+      "const": ["{247145F8-425B-46EA-B22F-560F2EE43DAE}"]
+    },
+    "orphanPackageCaches": {
+      "const": [
+        {
+          "directoryName": "{40C25BD0-2C4F-4697-AE8D-42B6E24EBB41}v0.1.0",
+          "dependencyProviderKey": "{40C25BD0-2C4F-4697-AE8D-42B6E24EBB41}_v0.1.0",
+          "productCode": "{40C25BD0-2C4F-4697-AE8D-42B6E24EBB41}",
+          "packageCode": "{85C80D60-7836-4F20-AC4D-EBB62CF7E663}",
+          "upgradeCode": "{F6467493-5819-4046-900A-C9FDF87DF7C1}",
+          "productVersion": "0.1.0",
+          "payload": {
+            "fileName": "distraction-firewall-app-0.1.0-alpha.2-win-x64.msi",
+            "sizeBytes": 78274808,
+            "sha256": "9a41cb076aceae9aede9028b7410c15a84150416c3fe657b7e6daff31bc2cc17"
+          }
+        },
+        {
+          "directoryName": "{1B676614-3B1F-4646-9788-889C071DAAA0}v0.1.0",
+          "dependencyProviderKey": "{1B676614-3B1F-4646-9788-889C071DAAA0}_v0.1.0",
+          "productCode": "{1B676614-3B1F-4646-9788-889C071DAAA0}",
+          "packageCode": "{11A25941-6631-4793-8AD7-753985510F77}",
+          "upgradeCode": "{275EC377-2EB2-487F-AD4B-BA0BA85C2FFB}",
+          "productVersion": "0.1.0",
+          "payload": {
+            "fileName": "distraction-firewall-runtime-0.1.0-alpha.2-win-x64.msi",
+            "sizeBytes": 86282518,
+            "sha256": "b9a94e0a2dbdc40ba3b0996fc5a304bf153d1e3e30ef8e0e7d420844bd300dfe"
+          }
+        }
+      ]
+    }
+  }
+}

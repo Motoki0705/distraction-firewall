@@ -22,15 +22,19 @@ Console.CancelKeyPress += (_, eventArgs) =>
     shutdown.Cancel();
 };
 
+RuntimePaths? paths = null;
+var cleanupStage = CleanupFailureStage.ResolveInstalledPaths;
 try
 {
-    var paths = RuntimePathResolver.ResolveInstalled(
+    paths = RuntimePathResolver.ResolveInstalled(
         RuntimeComponent.Finalizer,
         AppContext.BaseDirectory);
     if (command.Mode is FinalizerMode.GuardRuntimeUninstall or
         FinalizerMode.CleanupRuntimeInstallation)
     {
+        cleanupStage = CleanupFailureStage.VerifyExecutionIdentity;
         DemandLocalSystem();
+        cleanupStage = CleanupFailureStage.VerifyInactiveLease;
         var guard = new RuntimeUninstallGuard(paths);
         await guard.VerifyInactiveAsync(
             RuntimeUninstallGuard.DefaultLockTimeout,
@@ -40,16 +44,19 @@ try
             return 0;
         }
 
+        _ = CleanupFailureDiagnostic.TryDelete(paths);
+        cleanupStage = CleanupFailureStage.ResolveProductIdentity;
         var cleanupProductInstanceId = await RuntimeSettingsLoader.ResolveInstallationCleanupProductInstanceIdAsync(
             paths,
-            new RegistryRuntimeInstallerSeedSource(),
             shutdown.Token).ConfigureAwait(false);
+        cleanupStage = CleanupFailureStage.CreateCleanupBackends;
         var cleanup = WindowsInstallationCleanup.CreateLive(
             new LiveWindowsInstallationCleanupOptions
             {
                 ProductInstanceId = cleanupProductInstanceId,
                 WorkerExecutablePath = paths.WorkerExecutablePath,
             });
+        cleanupStage = CleanupFailureStage.RemoveOwnedInstallationResources;
         await cleanup.CleanupAsync(shutdown.Token).ConfigureAwait(false);
         return 0;
     }
@@ -86,8 +93,12 @@ catch (ActiveLeasePresentException exception)
 }
 catch (Exception exception) when (command.Mode == FinalizerMode.CleanupRuntimeInstallation)
 {
+    var diagnostic = CleanupFailureDiagnostic.Create(cleanupStage, exception);
+    var persisted = paths is not null && CleanupFailureDiagnostic.TryWrite(paths, diagnostic);
     Console.Error.WriteLine(
-        $"Lease Runtime installation cleanup failed closed: {exception.GetType().Name}: {exception.Message}");
+        $"Lease Runtime installation cleanup failed closed: " +
+        $"{CleanupFailureDiagnostic.FormatConsoleSummary(diagnostic)}; " +
+        $"diagnostic_persisted={persisted.ToString().ToLowerInvariant()}.");
     return 6;
 }
 catch (Exception exception)

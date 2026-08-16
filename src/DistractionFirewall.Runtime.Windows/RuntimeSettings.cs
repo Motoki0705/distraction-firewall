@@ -135,11 +135,9 @@ public static class RuntimeSettingsLoader
 
     public static async Task<string> ResolveInstallationCleanupProductInstanceIdAsync(
         RuntimePaths paths,
-        IRuntimeInstallerSeedSource installerSeedSource,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(paths);
-        ArgumentNullException.ThrowIfNull(installerSeedSource);
         if (File.Exists(paths.SettingsPath))
         {
             var settings = await LoadRequiredAsync(paths, cancellationToken).ConfigureAwait(false);
@@ -157,20 +155,11 @@ public static class RuntimeSettingsLoader
                 "The Runtime settings path exists but is not a readable regular file.");
         }
 
-        // A service that never started has no settings.json yet. The installed,
-        // 64-bit HKLM seed still binds cleanup to this product's fixed identity.
-        // OwnerSid is deliberately not used here: it authorizes activation, not
-        // removal of installation-scoped objects by the LocalSystem MSI action.
-        var seed = installerSeedSource.ReadRequired();
-        if (!string.Equals(
-                seed.ProductInstanceId,
-                RuntimePaths.ProductInstanceId,
-                StringComparison.Ordinal))
-        {
-            throw new InvalidDataException(
-                "The installer registry seed identifies a different product instance.");
-        }
-
+        // A service that never bootstrapped has no settings.json. Installation
+        // cleanup is still bound to this product by the protected, fixed
+        // finalizer path and the compile-time product identity. Do not depend on
+        // mutable installer metadata that Windows Installer may remove while
+        // executing the uninstall transaction.
         return RuntimePaths.ProductInstanceId;
     }
 

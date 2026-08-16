@@ -1,0 +1,1608 @@
+#requires -Version 5.1
+
+[CmdletBinding()]
+param()
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+$windowsDirectory = [IO.Path]::GetFullPath([Environment]::GetFolderPath([Environment+SpecialFolder]::Windows)).TrimEnd('\')
+$systemDirectory = [IO.Path]::GetFullPath([Environment]::GetFolderPath([Environment+SpecialFolder]::System)).TrimEnd('\')
+$trustedPowerShellRoot = [IO.Path]::GetFullPath([IO.Path]::Combine($systemDirectory, 'WindowsPowerShell')).TrimEnd('\')
+$trustedPowerShellHome = [IO.Path]::GetFullPath([IO.Path]::Combine($trustedPowerShellRoot, 'v1.0')).TrimEnd('\')
+if (-not ([IO.Path]::GetFullPath($PSHOME).TrimEnd('\').Equals($trustedPowerShellHome, [StringComparison]::OrdinalIgnoreCase))) {
+    throw 'Elevated phase is not running from the native Windows PowerShell 5.1 system directory.'
+}
+$trustedPowerShellModuleRoot = [IO.Path]::Combine($trustedPowerShellHome, 'Modules')
+$env:PATH = "$systemDirectory;$windowsDirectory;$trustedPowerShellHome"
+$env:PSModulePath = $trustedPowerShellModuleRoot
+$env:PATHEXT = '.COM;.EXE;.BAT;.CMD'
+$env:PSExecutionPolicyPreference = 'Bypass'
+$env:SystemRoot = $windowsDirectory
+$env:windir = $windowsDirectory
+$env:ComSpec = [IO.Path]::Combine($systemDirectory, 'cmd.exe')
+foreach ($moduleName in @('Microsoft.PowerShell.Management', 'Microsoft.PowerShell.Utility', 'Microsoft.PowerShell.Security', 'DnsClient', 'CimCmdlets')) {
+    $moduleManifest = [IO.Path]::Combine($trustedPowerShellModuleRoot, $moduleName, "$moduleName.psd1")
+    Microsoft.PowerShell.Core\Import-Module -Name $moduleManifest -Force -ErrorAction Stop
+}
+$PSModuleAutoLoadingPreference = 'None'
+
+$campaignBase64 = '__CAMPAIGN_BASE64__'
+$campaignJson = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($campaignBase64))
+$campaign = $campaignJson | ConvertFrom-Json
+$stateRoot = Join-Path $campaign.output_root 'state'
+$returnedEvidenceRoot = Join-Path $campaign.output_root 'evidence'
+$programData = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
+$stageRoot = Join-Path $programData ("DistractionFirewall-LiveValidation-{0}" -f $campaign.campaign_id)
+$stagePayloadRoot = Join-Path $stageRoot 'payload'
+$stageEvidenceRoot = Join-Path $stageRoot 'evidence'
+$stageScratchRoot = Join-Path $stageRoot 'scratch'
+$msiexec = [IO.Path]::Combine($systemDirectory, 'msiexec.exe')
+$netsh = [IO.Path]::Combine($systemDirectory, 'netsh.exe')
+$installerRoot = [IO.Path]::Combine($windowsDirectory, 'Installer')
+$serviceName = [string]$campaign.fixed.ServiceName
+$installedCandidate = $false
+$candidateInstallAttempted = $false
+$campaignError = $null
+$cleanupErrors = [Collections.Generic.List[string]]::new()
+$steps = [Collections.Generic.List[object]]::new()
+$candidateLocalPackages = @()
+$stageCreatedByCampaign = $false
+$approvedRecoveryManifestSha256 = '29962be5b7992ac17b13ac4aaa0c46320c5a5b4fba481e3b1e46a36bad9366e2'
+$approvedRecoveryExistingService = [ordered]@{
+    size = [int64]162816
+    sha256 = '28ceaabde4f29903813e1431f6599c5072385f7162b7309fa2bb97ea9f67626b'
+    authenticodeStatus = 'NotSigned'
+}
+$approvedRecoveryManifest = [ordered]@{
+    schema = 'distraction-firewall/runtime-recovery/v1'
+    incidentId = 'pretag-alpha2-runtime-uninstall-1603'
+    approvedForMachineRecovery = $true
+    mode = 'repair_then_uninstall'
+    runtimeMsi = [ordered]@{
+        fileName = 'distraction-firewall-runtime-recovery-1b676614-win-x64.msi'
+        size = [int64]86290721
+        sha256 = 'ef35d8ccb1a110f70dd4f6a9989bbc2b30a0b2b467b4fdc380ce6973b83c50da'
+        authenticodeStatus = 'NotSigned'
+        productCode = '{1B676614-3B1F-4646-9788-889C071DAAA0}'
+        packageCode = '{AD62973E-B6B1-49B6-961B-C3688C7B9C26}'
+        upgradeCode = '{275EC377-2EB2-487F-AD4B-BA0BA85C2FFB}'
+        productVersion = '0.1.0'
+    }
+    expectedInstalled = [ordered]@{
+        productCode = '{1B676614-3B1F-4646-9788-889C071DAAA0}'
+        packageCode = '{11A25941-6631-4793-8AD7-753985510F77}'
+        productVersion = '0.1.0'
+        localPackage = [ordered]@{
+            sizeBytes = [int64]86282518
+            sha256 = 'b9a94e0a2dbdc40ba3b0996fc5a304bf153d1e3e30ef8e0e7d420844bd300dfe'
+        }
+    }
+    orphanBundleProviderKeys = @('{247145F8-425B-46EA-B22F-560F2EE43DAE}')
+    orphanPackageCaches = @(
+        [ordered]@{
+            directoryName = '{40C25BD0-2C4F-4697-AE8D-42B6E24EBB41}v0.1.0'
+            dependencyProviderKey = '{40C25BD0-2C4F-4697-AE8D-42B6E24EBB41}_v0.1.0'
+            productCode = '{40C25BD0-2C4F-4697-AE8D-42B6E24EBB41}'
+            packageCode = '{85C80D60-7836-4F20-AC4D-EBB62CF7E663}'
+            upgradeCode = '{F6467493-5819-4046-900A-C9FDF87DF7C1}'
+            productVersion = '0.1.0'
+            payload = [ordered]@{
+                fileName = 'distraction-firewall-app-0.1.0-alpha.2-win-x64.msi'
+                sizeBytes = [int64]78274808
+                sha256 = '9a41cb076aceae9aede9028b7410c15a84150416c3fe657b7e6daff31bc2cc17'
+            }
+        },
+        [ordered]@{
+            directoryName = '{1B676614-3B1F-4646-9788-889C071DAAA0}v0.1.0'
+            dependencyProviderKey = '{1B676614-3B1F-4646-9788-889C071DAAA0}_v0.1.0'
+            productCode = '{1B676614-3B1F-4646-9788-889C071DAAA0}'
+            packageCode = '{11A25941-6631-4793-8AD7-753985510F77}'
+            upgradeCode = '{275EC377-2EB2-487F-AD4B-BA0BA85C2FFB}'
+            productVersion = '0.1.0'
+            payload = [ordered]@{
+                fileName = 'distraction-firewall-runtime-0.1.0-alpha.2-win-x64.msi'
+                sizeBytes = [int64]86282518
+                sha256 = 'b9a94e0a2dbdc40ba3b0996fc5a304bf153d1e3e30ef8e0e7d420844bd300dfe'
+            }
+        }
+    )
+}
+
+function Assert-Condition {
+    param(
+        [Parameter(Mandatory)][bool]$Condition,
+        [Parameter(Mandatory)][string]$Message
+    )
+    if (-not $Condition) { throw $Message }
+}
+
+function Assert-AcceptableMandatoryIntegritySddl {
+    param(
+        [AllowEmptyString()][Parameter(Mandatory)][string]$Sddl,
+        [Parameter(Mandatory)][string]$Description
+    )
+
+    # LABEL_SECURITY_INFORMATION returns an empty string when no explicit label
+    # exists. Windows then applies the effective Medium object integrity level.
+    if ([string]::IsNullOrEmpty($Sddl)) { return }
+    try { $descriptor = [Security.AccessControl.RawSecurityDescriptor]::new($Sddl) }
+    catch { throw "$Description mandatory integrity label could not be parsed." }
+    $mandatoryAces = @()
+    if ($null -ne $descriptor.SystemAcl) {
+        for ($index = 0; $index -lt $descriptor.SystemAcl.Count; $index++) {
+            $ace = $descriptor.SystemAcl[$index]
+            if ([int]$ace.AceType -eq 17) { $mandatoryAces += $ace }
+        }
+    }
+    if ($mandatoryAces.Count -eq 0) { return }
+    Assert-Condition ($mandatoryAces.Count -eq 1) "$Description has a conflicting mandatory integrity label set."
+    $binary = New-Object byte[] $mandatoryAces[0].BinaryLength
+    $mandatoryAces[0].GetBinaryForm($binary, 0)
+    Assert-Condition ($binary.Length -ge 20) "$Description mandatory integrity label is malformed."
+    $policyMask = [BitConverter]::ToUInt32($binary, 4)
+    Assert-Condition ($policyMask -in @([uint32]1, [uint32]3, [uint32]5, [uint32]7)) "$Description mandatory integrity policy is unknown or permits write-up."
+    try { $labelSid = [Security.Principal.SecurityIdentifier]::new($binary, 8) }
+    catch { throw "$Description mandatory integrity SID could not be parsed." }
+    Assert-Condition ($binary.Length -eq (8 + $labelSid.BinaryLength)) "$Description mandatory integrity label has trailing data."
+    Assert-Condition ($labelSid.Value -in @('S-1-16-8192', 'S-1-16-12288', 'S-1-16-16384')) "$Description has an untrusted, low, or unknown mandatory integrity level: $($labelSid.Value)"
+}
+
+function Assert-PrivilegedPathAcl {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Description
+    )
+    $acl = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Path
+    Assert-AcceptableMandatoryIntegritySddl ([DistractionFirewall.LiveValidation.MandatoryIntegrityInspection]::GetLabelSddl([IO.Path]::GetFullPath($Path))) $Description
+    $trustedInstaller = 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
+    $trustedWriterSids = @('S-1-5-18', 'S-1-5-32-544', $trustedInstaller)
+    $ownerSid = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+    Assert-Condition ($ownerSid -in $trustedWriterSids) "$Description owner is not SYSTEM, Administrators, or TrustedInstaller: $ownerSid"
+    $dangerousRightsMask = [int64]0x500D0156
+    $descriptor = [Security.AccessControl.RawSecurityDescriptor]::new($acl.GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::All))
+    for ($index = 0; $index -lt $descriptor.DiscretionaryAcl.Count; $index++) {
+        $ace = $descriptor.DiscretionaryAcl[$index]
+        if ($ace -isnot [Security.AccessControl.QualifiedAce] -or $ace.AceQualifier -ne [Security.AccessControl.AceQualifier]::AccessAllowed) { continue }
+        if (([int]$ace.AceFlags -band [int][Security.AccessControl.AceFlags]::InheritOnly) -ne 0) { continue }
+        $rawRights = [int64][int32]$ace.AccessMask
+        if ($rawRights -lt 0) { $rawRights += 4294967296 }
+        if (($rawRights -band $dangerousRightsMask) -ne 0) {
+            $sid = $ace.SecurityIdentifier.Value
+            Assert-Condition ($sid -in $trustedWriterSids) "$Description grants dangerous write/delete/ACL rights to non-privileged SID $sid."
+        }
+    }
+}
+
+function Assert-TrustedSystemBinary {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Description
+    )
+    $fullPath = [IO.Path]::GetFullPath($Path)
+    Assert-Condition ($fullPath.StartsWith($windowsDirectory + '\', [StringComparison]::OrdinalIgnoreCase)) "$Description escaped the native Windows directory."
+    foreach ($trustedPath in @($windowsDirectory, $systemDirectory, $trustedPowerShellRoot, $trustedPowerShellHome, $trustedPowerShellModuleRoot, $fullPath) | Select-Object -Unique) {
+        Assert-Condition (Test-Path -LiteralPath $trustedPath) "$Description trusted path is missing: $trustedPath"
+        $item = Microsoft.PowerShell.Management\Get-Item -LiteralPath $trustedPath -Force
+        Assert-Condition (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) "$Description trusted path is a reparse point: $trustedPath"
+        Assert-PrivilegedPathAcl $trustedPath "$Description trusted path"
+    }
+    Assert-Condition (Test-Path -LiteralPath $fullPath -PathType Leaf) "$Description is missing: $fullPath"
+    $signature = Microsoft.PowerShell.Security\Get-AuthenticodeSignature -LiteralPath $fullPath
+    $microsoftWindowsSubject = 'CN=Microsoft Windows, O=Microsoft Corporation, L=Redmond, S=Washington, C=US'
+    Assert-Condition ($signature.Status.ToString() -ceq 'Valid' -and $null -ne $signature.SignerCertificate) "$Description Authenticode signature is invalid."
+    Assert-Condition ([string]$signature.SignerCertificate.Subject -ceq $microsoftWindowsSubject) "$Description publisher is not Microsoft Windows."
+}
+
+function Assert-ApprovedRecoveryCampaign {
+    if ($null -eq $campaign.recovery) { return }
+
+    Assert-Condition ([string]$campaign.recovery.manifest_sha256 -ceq $approvedRecoveryManifestSha256) 'Embedded recovery manifest hash is not code-approved.'
+    Assert-Condition ([string]$campaign.recovery.approved_manifest_sha256 -ceq $approvedRecoveryManifestSha256) 'Embedded approved recovery hash is not code-owned.'
+    $actual = $campaign.recovery.manifest | ConvertTo-Json -Depth 12 -Compress
+    $expected = $approvedRecoveryManifest | ConvertTo-Json -Depth 12 -Compress
+    Assert-Condition ($actual -ceq $expected) 'Embedded recovery manifest is outside the code-approved incident allowlist.'
+}
+
+function Add-Step {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][string]$Outcome,
+        [string]$Detail
+    )
+    $steps.Add([pscustomobject][ordered]@{
+        name = $Name
+        outcome = $Outcome
+        detail = $Detail
+        recorded_at_utc = [DateTime]::UtcNow.ToString('o')
+    })
+}
+
+function Get-LowerSha256 {
+    param([Parameter(Mandatory)][string]$Path)
+    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+
+function Assert-LeafFingerprint {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][int64]$Size,
+        [Parameter(Mandatory)][string]$Sha256,
+        [string]$AuthenticodeStatus,
+        [Parameter(Mandatory)][string]$Description
+    )
+    Assert-Condition (Test-Path -LiteralPath $Path -PathType Leaf) "$Description is missing: $Path"
+    $item = Get-Item -LiteralPath $Path -Force
+    Assert-Condition (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) "$Description is a reparse point: $Path"
+    Assert-Condition ($item.Length -eq $Size) "$Description size mismatch: $Path"
+    Assert-Condition ((Get-LowerSha256 $Path) -ceq $Sha256) "$Description SHA-256 mismatch: $Path"
+    if (-not [string]::IsNullOrEmpty($AuthenticodeStatus)) {
+        $status = (Get-AuthenticodeSignature -LiteralPath $Path).Status.ToString()
+        Assert-Condition ($status -ceq $AuthenticodeStatus) "$Description Authenticode status mismatch: $Path"
+    }
+}
+
+function Assert-PinnedEvidenceInputs {
+    $records = @(
+        [pscustomobject]@{ name = 'candidate-manifest.json'; size = [int64]$campaign.input_records.candidate_manifest_size; sha256 = [string]$campaign.input_records.candidate_manifest_sha256 },
+        [pscustomobject]@{ name = 'provenance-envelope.json'; size = [int64]$campaign.input_records.provenance_envelope_size; sha256 = [string]$campaign.input_records.provenance_envelope_sha256 },
+        [pscustomobject]@{ name = 'hosted-evidence.json'; size = [int64]$campaign.candidate.hosted_evidence.size; sha256 = [string]$campaign.candidate.hosted_evidence.sha256 },
+        [pscustomobject]@{ name = 'candidate-subjects.sha256'; size = [int64]$campaign.candidate.subjects.size; sha256 = [string]$campaign.candidate.subjects.sha256 },
+        [pscustomobject]@{ name = 'provenance.bundle.json'; size = [int64]$campaign.candidate.attestation_bundle.size; sha256 = [string]$campaign.candidate.attestation_bundle.sha256 }
+    )
+    if ($null -ne $campaign.recovery) {
+        $records += [pscustomobject]@{ name = 'runtime-recovery-manifest.json'; size = [int64]$campaign.recovery.manifest_size; sha256 = [string]$campaign.recovery.manifest_sha256 }
+    }
+    foreach ($record in $records) {
+        Assert-LeafFingerprint (Join-Path $returnedEvidenceRoot $record.name) $record.size $record.sha256 '' "pinned evidence input $($record.name)"
+    }
+}
+
+function Write-NewJson {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)]$Value
+    )
+    $json = $Value | ConvertTo-Json -Depth 30
+    $encoding = [Text.UTF8Encoding]::new($false)
+    $stream = [IO.File]::Open($Path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+    try {
+        $writer = [IO.StreamWriter]::new($stream, $encoding)
+        try { $writer.WriteLine($json) } finally { $writer.Dispose() }
+    }
+    finally { $stream.Dispose() }
+}
+
+function Write-Phase {
+    param(
+        [Parameter(Mandatory)][string]$FileName,
+        [Parameter(Mandatory)][string]$Phase,
+        [Parameter(Mandatory)][string]$Outcome,
+        [hashtable]$Additional
+    )
+    $record = [ordered]@{
+        schema = 'distraction-firewall/live-validation-phase/v1'
+        campaign_id = [string]$campaign.campaign_id
+        phase_nonce = [string]$campaign.phase_nonce
+        phase = $Phase
+        outcome = $Outcome
+        recorded_at_utc = [DateTime]::UtcNow.ToString('o')
+        owner_sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        elevated = $true
+    }
+    if ($null -ne $Additional) {
+        foreach ($key in $Additional.Keys) { $record[$key] = $Additional[$key] }
+    }
+    Write-NewJson (Join-Path $stateRoot $FileName) $record
+}
+
+function Read-SmokePhase {
+    $path = Join-Path $stateRoot 'standard-user-smoke-complete.json'
+    $deadline = [DateTime]::UtcNow.AddMinutes(12)
+    while ([DateTime]::UtcNow -lt $deadline) {
+        if (Test-Path -LiteralPath $path -PathType Leaf) {
+            $record = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+            Assert-Condition ([string]$record.schema -ceq 'distraction-firewall/live-validation-phase/v1') 'Standard-user phase schema mismatch.'
+            Assert-Condition ([string]$record.campaign_id -ceq [string]$campaign.campaign_id) 'Standard-user phase campaign mismatch.'
+            Assert-Condition ([string]$record.phase_nonce -ceq [string]$campaign.phase_nonce) 'Standard-user phase nonce mismatch.'
+            Assert-Condition ([string]$record.phase -ceq 'standard-user-smoke-complete') 'Standard-user phase type mismatch.'
+            Assert-Condition ([string]$record.outcome -cin @('passed', 'failed')) 'Standard-user phase outcome is invalid.'
+            Assert-Condition ([string]$record.owner_sid -ceq [string]$campaign.owner_sid -and -not [bool]$record.elevated) 'Standard-user phase crossed the owner/token boundary.'
+            Assert-Condition (-not [bool]$record.lease_start_invoked) 'Standard-user phase reported a lease-start operation.'
+            return $record
+        }
+        Start-Sleep -Milliseconds 250
+    }
+    throw 'Timed out waiting for standard-user smoke; proceeding to exact uninstall.'
+}
+
+function Get-PendingRenameSnapshot {
+    $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry64)
+    try {
+        $key = $base.OpenSubKey('SYSTEM\CurrentControlSet\Control\Session Manager', $false)
+        Assert-Condition ($null -ne $key) 'Session Manager registry key is missing.'
+        try {
+            $values = [ordered]@{}
+            foreach ($name in @('PendingFileRenameOperations', 'PendingFileRenameOperations2')) {
+                $names = @($key.GetValueNames())
+                if ($names -cnotcontains $name) {
+                    $values[$name] = [ordered]@{ present = $false; kind = $null; pairs = @() }
+                    continue
+                }
+                $kind = $key.GetValueKind($name).ToString()
+                Assert-Condition ($kind -ceq 'MultiString') "$name must be REG_MULTI_SZ."
+                [string[]]$raw = @($key.GetValue($name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames))
+                Assert-Condition (($raw.Count % 2) -eq 0) "$name has an incomplete source/destination pair."
+                $pairs = @()
+                for ($index = 0; $index -lt $raw.Count; $index += 2) {
+                    Assert-Condition (-not [string]::IsNullOrEmpty($raw[$index])) "$name contains an empty source."
+                    $pairs += [ordered]@{ source = $raw[$index]; destination = $raw[$index + 1] }
+                }
+                $values[$name] = [ordered]@{ present = $true; kind = $kind; pairs = @($pairs) }
+            }
+            return [pscustomobject][ordered]@{ schema = 'distraction-firewall/pending-rename-snapshot/v1'; values = [pscustomobject]$values }
+        }
+        finally { $key.Dispose() }
+    }
+    finally { $base.Dispose() }
+}
+
+function Get-PendingPairs {
+    param(
+        [Parameter(Mandatory)]$Snapshot,
+        [Parameter(Mandatory)][string]$Name
+    )
+    $value = $Snapshot.values.PSObject.Properties[$Name].Value
+    return @($value.pairs)
+}
+
+function Assert-PendingRenameEquals {
+    param(
+        [Parameter(Mandatory)]$Expected,
+        [Parameter(Mandatory)]$Actual,
+        [Parameter(Mandatory)][string]$Description
+    )
+    Assert-Condition ([string]$Expected.schema -ceq 'distraction-firewall/pending-rename-snapshot/v1' -and [string]$Actual.schema -ceq [string]$Expected.schema) "$Description schema mismatch."
+    foreach ($name in @('PendingFileRenameOperations', 'PendingFileRenameOperations2')) {
+        $expectedValue = $Expected.values.PSObject.Properties[$name].Value
+        $actualValue = $Actual.values.PSObject.Properties[$name].Value
+        Assert-Condition ([bool]$expectedValue.present -eq [bool]$actualValue.present -and [string]$expectedValue.kind -ceq [string]$actualValue.kind) "$Description changed $name presence/type."
+        $expectedPairs = @(Get-PendingPairs $Expected $name)
+        $actualPairs = @(Get-PendingPairs $Actual $name)
+        Assert-Condition ($expectedPairs.Count -eq $actualPairs.Count) "$Description changed $name pair count."
+        for ($index = 0; $index -lt $expectedPairs.Count; $index++) {
+            Assert-Condition ([string]$expectedPairs[$index].source -ceq [string]$actualPairs[$index].source -and [string]$expectedPairs[$index].destination -ceq [string]$actualPairs[$index].destination) "$Description changed $name pair order/content."
+        }
+    }
+}
+
+function Assert-PendingRenameBaselinePlusBurn {
+    param(
+        [Parameter(Mandatory)]$Baseline,
+        [Parameter(Mandatory)]$Actual
+    )
+    $verifiedExtras = @()
+    foreach ($name in @('PendingFileRenameOperations', 'PendingFileRenameOperations2')) {
+        $baselineValue = $Baseline.values.PSObject.Properties[$name].Value
+        $actualValue = $Actual.values.PSObject.Properties[$name].Value
+        $baselinePairs = @(Get-PendingPairs $Baseline $name)
+        $actualPairs = @(Get-PendingPairs $Actual $name)
+        Assert-Condition ($actualPairs.Count -ge $baselinePairs.Count) "Postflight removed a baseline $name pair."
+        for ($index = 0; $index -lt $baselinePairs.Count; $index++) {
+            Assert-Condition ([string]$baselinePairs[$index].source -ceq [string]$actualPairs[$index].source -and [string]$baselinePairs[$index].destination -ceq [string]$actualPairs[$index].destination) "Postflight changed baseline $name order/content."
+        }
+        foreach ($pair in @($actualPairs | Select-Object -Skip $baselinePairs.Count)) {
+            Assert-Condition ($name -ceq 'PendingFileRenameOperations') 'Burn pending delete appeared in the unsupported secondary value.'
+            Assert-Condition ([string]::IsNullOrEmpty([string]$pair.destination)) 'New pending rename is not a delete operation.'
+            $prefix = '*1\??\'
+            Assert-Condition (([string]$pair.source).StartsWith($prefix, [StringComparison]::Ordinal)) 'New pending delete has an unsupported source prefix.'
+            $path = [IO.Path]::GetFullPath(([string]$pair.source).Substring($prefix.Length))
+            $tempRoot = [IO.Path]::GetFullPath([string]$campaign.paths.owner_temp_root).TrimEnd('\')
+            Assert-Condition ([IO.Path]::GetDirectoryName($path).Equals($tempRoot, [StringComparison]::OrdinalIgnoreCase)) 'Burn pending delete is outside the fixed owner Temp root.'
+            Assert-Condition ([IO.Path]::GetFileName($path) -cmatch '^DEL[0-9A-F]{4}\.tmp$') 'Burn pending-delete filename is not canonical.'
+            Assert-LeafFingerprint $path ([int64]$campaign.candidate.setup.burn_engine_size) $campaign.candidate.setup.burn_engine_sha256 '' 'detached Burn engine'
+            $verifiedExtras += [ordered]@{ value_name = $name; source = [string]$pair.source; destination = ''; path = $path; sha256 = Get-LowerSha256 $path }
+        }
+        if ($actualPairs.Count -eq 0) {
+            Assert-Condition (-not [bool]$actualValue.present -or [string]$actualValue.kind -ceq 'MultiString') 'Postflight pending rename type is invalid.'
+        }
+    }
+    return @($verifiedExtras)
+}
+
+function Convert-RegistryValueForEvidence {
+    param(
+        [Parameter(Mandatory)]$Value,
+        [Parameter(Mandatory)][string]$Kind
+    )
+    switch ($Kind) {
+        'Binary' { return [Convert]::ToBase64String([byte[]]$Value) }
+        'MultiString' { return @([string[]]$Value) }
+        'DWord' { return ([uint32]$Value).ToString([Globalization.CultureInfo]::InvariantCulture) }
+        'QWord' { return ([uint64]$Value).ToString([Globalization.CultureInfo]::InvariantCulture) }
+        default { return [string]$Value }
+    }
+}
+
+function Get-BrowserPolicySnapshot {
+    $paths = @(
+        'SOFTWARE\Policies\Google\Chrome',
+        'SOFTWARE\Policies\Google\Chrome\URLBlocklist',
+        'SOFTWARE\Policies\Google\Chrome\URLAllowlist',
+        'SOFTWARE\Policies\Microsoft\Edge',
+        'SOFTWARE\Policies\Microsoft\Edge\URLBlocklist',
+        'SOFTWARE\Policies\Microsoft\Edge\URLAllowlist',
+        'SOFTWARE\Policies\Mozilla\Firefox\WebsiteFilter\Block',
+        'SOFTWARE\Policies\Mozilla\Firefox\WebsiteFilter\Exceptions',
+        'SOFTWARE\Policies\Mozilla\Firefox\DNSOverHTTPS'
+    )
+    $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry64)
+    try {
+        $records = @()
+        foreach ($path in $paths) {
+            $key = $base.OpenSubKey($path, $false)
+            if ($null -eq $key) { $records += [ordered]@{ path = $path; exists = $false; values = @() }; continue }
+            try {
+                $values = @()
+                foreach ($name in @($key.GetValueNames() | Sort-Object)) {
+                    $kind = $key.GetValueKind($name).ToString()
+                    $raw = $key.GetValue($name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                    $values += [ordered]@{ name = [string]$name; kind = $kind; value = Convert-RegistryValueForEvidence $raw $kind }
+                }
+                $records += [ordered]@{ path = $path; exists = $true; values = @($values) }
+            }
+            finally { $key.Dispose() }
+        }
+        return @($records)
+    }
+    finally { $base.Dispose() }
+}
+
+function Get-DnsClientSnapshot {
+    return @(
+        DnsClient\Get-DnsClientServerAddress -ErrorAction Stop | Sort-Object InterfaceIndex, AddressFamily | ForEach-Object {
+            [ordered]@{
+                interface_index = [uint32]$_.InterfaceIndex
+                interface_alias = [string]$_.InterfaceAlias
+                address_family = [string]$_.AddressFamily
+                server_addresses = @([string[]]$_.ServerAddresses)
+            }
+        }
+    )
+}
+
+function Get-SystemBaseline {
+    return [pscustomobject][ordered]@{
+        schema = 'distraction-firewall/system-baseline/v1'
+        dns_client_server_addresses = @(Get-DnsClientSnapshot)
+        browser_machine_policy = @(Get-BrowserPolicySnapshot)
+    }
+}
+
+function Assert-SystemBaselineEquals {
+    param(
+        [Parameter(Mandatory)]$Expected,
+        [Parameter(Mandatory)]$Actual,
+        [Parameter(Mandatory)][string]$Description
+    )
+    $expectedJson = $Expected | ConvertTo-Json -Depth 20 -Compress
+    $actualJson = $Actual | ConvertTo-Json -Depth 20 -Compress
+    Assert-Condition ($expectedJson -ceq $actualJson) "$Description changed DNS or browser machine-policy baseline."
+}
+
+function New-ProtectedStageDirectory {
+    param([Parameter(Mandatory)][string]$Path)
+    $expectedName = "DistractionFirewall-LiveValidation-{0}" -f $campaign.campaign_id
+    $fullPath = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+    Assert-Condition ([IO.Path]::GetDirectoryName($fullPath).Equals([IO.Path]::GetFullPath($programData).TrimEnd('\'), [StringComparison]::OrdinalIgnoreCase)) 'Protected stage must be a direct ProgramData child.'
+    Assert-Condition ([IO.Path]::GetFileName($fullPath) -ceq $expectedName) 'Protected stage name differs from the embedded campaign ID.'
+    Assert-Condition (-not (Test-Path -LiteralPath $fullPath)) 'Protected campaign stage already exists.'
+    $security = [Security.AccessControl.DirectorySecurity]::new()
+    $security.SetAccessRuleProtection($true, $false)
+    $inherit = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [Security.AccessControl.InheritanceFlags]::ObjectInherit
+    $propagation = [Security.AccessControl.PropagationFlags]::None
+    foreach ($sidValue in @('S-1-5-18', 'S-1-5-32-544')) {
+        $sid = [Security.Principal.SecurityIdentifier]::new($sidValue)
+        $rule = [Security.AccessControl.FileSystemAccessRule]::new($sid, [Security.AccessControl.FileSystemRights]::FullControl, $inherit, $propagation, [Security.AccessControl.AccessControlType]::Allow)
+        $security.AddAccessRule($rule)
+    }
+    $security.SetOwner([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'))
+    $null = [IO.Directory]::CreateDirectory($fullPath, $security)
+    $script:stageCreatedByCampaign = $true
+    $created = Get-Item -LiteralPath $fullPath -Force
+    Assert-Condition (($created.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) 'Protected stage was created as a reparse point.'
+    $owner = $created.GetAccessControl().GetOwner([Security.Principal.SecurityIdentifier]).Value
+    Assert-Condition ($owner -in @('S-1-5-18', 'S-1-5-32-544')) 'Protected stage owner is not SYSTEM/Administrators.'
+    Assert-NoBroadWriteAcl $fullPath 'protected campaign stage'
+}
+
+function Remove-VerifiedStageTree {
+    param([Parameter(Mandatory)][string]$Path)
+    $expectedParent = [IO.Path]::GetFullPath($programData).TrimEnd('\')
+    $fullPath = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+    Assert-Condition ([IO.Path]::GetDirectoryName($fullPath).Equals($expectedParent, [StringComparison]::OrdinalIgnoreCase)) 'Refusing to remove a stage outside the fixed LiveValidation root.'
+    Assert-Condition ([IO.Path]::GetFileName($fullPath) -ceq ("DistractionFirewall-LiveValidation-{0}" -f $campaign.campaign_id)) 'Refusing to remove a stage with a different campaign ID.'
+    if (-not (Test-Path -LiteralPath $fullPath -PathType Container)) { return }
+    $rootItem = Get-Item -LiteralPath $fullPath -Force
+    Assert-Condition (($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) 'Refusing to remove a reparse-point stage.'
+    $reparse = @(Get-ChildItem -LiteralPath $fullPath -Force -Recurse | Where-Object { ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 })
+    Assert-Condition ($reparse.Count -eq 0) 'Refusing to remove a stage containing reparse points.'
+    Remove-Item -LiteralPath $fullPath -Force -Recurse
+}
+
+function Get-MsiIdentity {
+    param([Parameter(Mandatory)][string]$Path)
+    $installer = New-Object -ComObject WindowsInstaller.Installer
+    $database = $null
+    try {
+        $database = $installer.OpenDatabase($Path, 0)
+        $values = [ordered]@{}
+        foreach ($name in @('ProductCode', 'UpgradeCode', 'ProductVersion')) {
+            $view = $database.OpenView("SELECT ``Value`` FROM ``Property`` WHERE ``Property``='$name'")
+            try {
+                $null = $view.Execute()
+                $record = $view.Fetch()
+                Assert-Condition ($null -ne $record) "MSI property '$name' is absent."
+                try { $values[$name] = [string]$record.StringData(1) }
+                finally { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($record) }
+            }
+            finally {
+                $null = $view.Close()
+                [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($view)
+            }
+        }
+        $summary = $database.SummaryInformation(0)
+        try { $packageCode = [string]$summary.Property(9) }
+        finally { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($summary) }
+        return [pscustomobject][ordered]@{
+            product_code = $values.ProductCode.ToUpperInvariant()
+            upgrade_code = $values.UpgradeCode.ToUpperInvariant()
+            product_version = $values.ProductVersion
+            package_code = $packageCode.ToUpperInvariant()
+        }
+    }
+    finally {
+        if ($null -ne $database) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($database) }
+        [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($installer)
+    }
+}
+
+$nativeTypeName = 'DistractionFirewall.LiveValidation.NativeInspection'
+if ($null -eq ($nativeTypeName -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+using System.Text;
+
+namespace DistractionFirewall.LiveValidation
+{
+    public sealed class FailureActions
+    {
+        public uint ResetPeriodSeconds { get; set; }
+        public int[] ActionTypes { get; set; }
+        public uint[] ActionDelaysMilliseconds { get; set; }
+        public bool ApplyOnNonCrashFailures { get; set; }
+    }
+
+    public static class NativeInspection
+    {
+        private const uint ErrorSuccess = 0;
+        private const uint ErrorNoMoreItems = 259;
+        private const uint ScManagerConnect = 0x0001;
+        private const uint ServiceQueryConfig = 0x0001;
+        private const uint ServiceConfigFailureActions = 2;
+        private const uint ServiceConfigFailureActionsFlag = 4;
+        private const int ErrorInsufficientBuffer = 122;
+        private const uint FwpErrorProviderNotFound = 0x80320005;
+        private const uint FwpErrorSubLayerNotFound = 0x80320007;
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct ServiceFailureActions
+        {
+            public uint ResetPeriod;
+            public IntPtr RebootMessage;
+            public IntPtr Command;
+            public uint ActionCount;
+            public IntPtr Actions;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct ServiceAction { public int Type; public uint Delay; }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct ServiceFailureActionsFlag
+        {
+            [MarshalAs(UnmanagedType.Bool)] public bool ApplyOnNonCrashFailures;
+        }
+
+        [DllImport("msi.dll", CharSet = CharSet.Unicode)]
+        private static extern uint MsiEnumRelatedProductsW(string upgradeCode, uint reserved, uint index, StringBuilder productCode);
+        [DllImport("msi.dll", CharSet = CharSet.Unicode)]
+        private static extern int MsiQueryProductStateW(string productCode);
+        [DllImport("msi.dll", CharSet = CharSet.Unicode)]
+        private static extern uint MsiGetProductInfoW(string productCode, string property, StringBuilder value, ref uint valueLength);
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true, ExactSpelling = true)]
+        private static extern IntPtr OpenSCManagerW(string machineName, string databaseName, uint desiredAccess);
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true, ExactSpelling = true)]
+        private static extern IntPtr OpenServiceW(IntPtr manager, string serviceName, uint desiredAccess);
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true, ExactSpelling = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool QueryServiceConfig2W(IntPtr service, uint level, IntPtr buffer, uint size, out uint needed);
+        [DllImport("advapi32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool CloseServiceHandle(IntPtr handle);
+        [DllImport("fwpuclnt.dll", CharSet = CharSet.Unicode)]
+        private static extern uint FwpmEngineOpen0(string serverName, uint authnService, IntPtr authIdentity, IntPtr session, out IntPtr engineHandle);
+        [DllImport("fwpuclnt.dll")]
+        private static extern uint FwpmEngineClose0(IntPtr engineHandle);
+        [DllImport("fwpuclnt.dll")]
+        private static extern uint FwpmProviderGetByKey0(IntPtr engineHandle, ref Guid key, out IntPtr provider);
+        [DllImport("fwpuclnt.dll")]
+        private static extern uint FwpmSubLayerGetByKey0(IntPtr engineHandle, ref Guid key, out IntPtr subLayer);
+        [DllImport("fwpuclnt.dll")]
+        private static extern void FwpmFreeMemory0(ref IntPtr pointer);
+
+        public static string[] EnumRelatedProducts(string upgradeCode)
+        {
+            List<string> products = new List<string>();
+            for (uint index = 0; ; index++)
+            {
+                StringBuilder product = new StringBuilder(39);
+                uint error = MsiEnumRelatedProductsW(upgradeCode, 0, index, product);
+                if (error == ErrorNoMoreItems) return products.ToArray();
+                if (error != ErrorSuccess) throw new Win32Exception((int)error, "MsiEnumRelatedProductsW failed.");
+                products.Add(product.ToString().ToUpperInvariant());
+            }
+        }
+
+        public static int QueryProductState(string productCode) { return MsiQueryProductStateW(productCode); }
+
+        public static string GetProductInfo(string productCode, string property)
+        {
+            uint length = 0;
+            uint error = MsiGetProductInfoW(productCode, property, null, ref length);
+            if (error == 1605) return null;
+            if (error != 234 && error != ErrorSuccess) throw new Win32Exception((int)error, "MsiGetProductInfoW size query failed.");
+            uint capacity = checked(length + 1);
+            StringBuilder value = new StringBuilder(checked((int)capacity));
+            error = MsiGetProductInfoW(productCode, property, value, ref capacity);
+            if (error != ErrorSuccess) throw new Win32Exception((int)error, "MsiGetProductInfoW failed.");
+            return value.ToString();
+        }
+
+        public static bool WfpProviderExists(Guid key) { return WfpObjectExists(key, false); }
+        public static bool WfpSubLayerExists(Guid key) { return WfpObjectExists(key, true); }
+
+        private static bool WfpObjectExists(Guid key, bool subLayer)
+        {
+            IntPtr engine;
+            uint error = FwpmEngineOpen0(null, 0, IntPtr.Zero, IntPtr.Zero, out engine);
+            if (error != ErrorSuccess) throw new Win32Exception((int)error, "FwpmEngineOpen0 failed.");
+            try
+            {
+                IntPtr value;
+                error = subLayer ? FwpmSubLayerGetByKey0(engine, ref key, out value) : FwpmProviderGetByKey0(engine, ref key, out value);
+                uint missing = subLayer ? FwpErrorSubLayerNotFound : FwpErrorProviderNotFound;
+                if (error == missing) return false;
+                if (error != ErrorSuccess) throw new Win32Exception((int)error, "WFP object query failed.");
+                try { return true; }
+                finally { FwpmFreeMemory0(ref value); }
+            }
+            finally { FwpmEngineClose0(engine); }
+        }
+
+        public static FailureActions ReadFailureActions(string serviceName)
+        {
+            IntPtr manager = OpenSCManagerW(null, null, ScManagerConnect);
+            if (manager == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error(), "OpenSCManagerW failed.");
+            try
+            {
+                IntPtr service = OpenServiceW(manager, serviceName, ServiceQueryConfig);
+                if (service == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error(), "OpenServiceW failed.");
+                try
+                {
+                    IntPtr actionsBuffer = QueryBuffer(service, ServiceConfigFailureActions);
+                    try
+                    {
+                        ServiceFailureActions actions = (ServiceFailureActions)Marshal.PtrToStructure(actionsBuffer, typeof(ServiceFailureActions));
+                        if (actions.ActionCount > 32) throw new InvalidOperationException("Unreasonable service failure-action count.");
+                        int count = checked((int)actions.ActionCount);
+                        int[] types = new int[count];
+                        uint[] delays = new uint[count];
+                        int size = Marshal.SizeOf(typeof(ServiceAction));
+                        for (int i = 0; i < count; i++)
+                        {
+                            ServiceAction action = (ServiceAction)Marshal.PtrToStructure(IntPtr.Add(actions.Actions, checked(i * size)), typeof(ServiceAction));
+                            types[i] = action.Type;
+                            delays[i] = action.Delay;
+                        }
+                        IntPtr flagBuffer = QueryBuffer(service, ServiceConfigFailureActionsFlag);
+                        try
+                        {
+                            ServiceFailureActionsFlag flag = (ServiceFailureActionsFlag)Marshal.PtrToStructure(flagBuffer, typeof(ServiceFailureActionsFlag));
+                            return new FailureActions { ResetPeriodSeconds = actions.ResetPeriod, ActionTypes = types, ActionDelaysMilliseconds = delays, ApplyOnNonCrashFailures = flag.ApplyOnNonCrashFailures };
+                        }
+                        finally { Marshal.FreeHGlobal(flagBuffer); }
+                    }
+                    finally { Marshal.FreeHGlobal(actionsBuffer); }
+                }
+                finally { CloseServiceHandle(service); }
+            }
+            finally { CloseServiceHandle(manager); }
+        }
+
+        private static IntPtr QueryBuffer(IntPtr service, uint level)
+        {
+            uint needed;
+            bool first = QueryServiceConfig2W(service, level, IntPtr.Zero, 0, out needed);
+            int error = Marshal.GetLastWin32Error();
+            if (first || error != ErrorInsufficientBuffer || needed == 0) throw new Win32Exception(error, "QueryServiceConfig2W size query failed.");
+            IntPtr buffer = Marshal.AllocHGlobal(checked((int)needed));
+            if (!QueryServiceConfig2W(service, level, buffer, needed, out needed))
+            {
+                error = Marshal.GetLastWin32Error();
+                Marshal.FreeHGlobal(buffer);
+                throw new Win32Exception(error, "QueryServiceConfig2W failed.");
+            }
+            return buffer;
+        }
+    }
+}
+'@
+}
+
+if ($null -eq ('DistractionFirewall.LiveValidation.MandatoryIntegrityInspection' -as [type])) {
+    Microsoft.PowerShell.Utility\Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+
+namespace DistractionFirewall.LiveValidation
+{
+    public static class MandatoryIntegrityInspection
+    {
+        private const uint SeFileObject = 1;
+        private const uint LabelSecurityInformation = 0x00000010;
+
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
+        private static extern uint GetNamedSecurityInfoW(
+            string objectName,
+            uint objectType,
+            uint securityInformation,
+            IntPtr owner,
+            IntPtr group,
+            IntPtr dacl,
+            out IntPtr sacl,
+            out IntPtr securityDescriptor);
+
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+        private static extern bool ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            IntPtr securityDescriptor,
+            uint requestedRevision,
+            uint securityInformation,
+            out IntPtr stringSecurityDescriptor,
+            out uint stringSecurityDescriptorLength);
+
+        [DllImport("kernel32.dll", ExactSpelling = true)]
+        private static extern IntPtr LocalFree(IntPtr memory);
+
+        public static string GetLabelSddl(string path)
+        {
+            IntPtr sacl;
+            IntPtr securityDescriptor;
+            uint result = GetNamedSecurityInfoW(
+                path,
+                SeFileObject,
+                LabelSecurityInformation,
+                IntPtr.Zero,
+                IntPtr.Zero,
+                IntPtr.Zero,
+                out sacl,
+                out securityDescriptor);
+            if (result != 0)
+            {
+                throw new Win32Exception((int)result);
+            }
+
+            try
+            {
+                IntPtr text;
+                uint textLength;
+                if (!ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                    securityDescriptor,
+                    1,
+                    LabelSecurityInformation,
+                    out text,
+                    out textLength))
+                {
+                    throw new Win32Exception(Marshal.GetLastWin32Error());
+                }
+
+                try
+                {
+                    return Marshal.PtrToStringUni(text) ?? string.Empty;
+                }
+                finally
+                {
+                    LocalFree(text);
+                }
+            }
+            finally
+            {
+                LocalFree(securityDescriptor);
+            }
+        }
+    }
+}
+'@
+}
+
+function Get-RelatedProducts {
+    param([Parameter(Mandatory)][string]$UpgradeCode)
+    return @([DistractionFirewall.LiveValidation.NativeInspection]::EnumRelatedProducts($UpgradeCode) | Sort-Object)
+}
+
+function Get-ProductState {
+    param([Parameter(Mandatory)][string]$ProductCode)
+    return [DistractionFirewall.LiveValidation.NativeInspection]::QueryProductState($ProductCode)
+}
+
+function Get-LocalPackage {
+    param([Parameter(Mandatory)][string]$ProductCode)
+    return [DistractionFirewall.LiveValidation.NativeInspection]::GetProductInfo($ProductCode, 'LocalPackage')
+}
+
+function Get-InstalledProductVersion {
+    param([Parameter(Mandatory)][string]$ProductCode)
+    return [DistractionFirewall.LiveValidation.NativeInspection]::GetProductInfo($ProductCode, 'VersionString')
+}
+
+function Test-DependencyProvider {
+    param([Parameter(Mandatory)][string]$ProviderKey)
+    $subKey = "SOFTWARE\Classes\Installer\Dependencies\$ProviderKey"
+    foreach ($view in @([Microsoft.Win32.RegistryView]::Registry64, [Microsoft.Win32.RegistryView]::Registry32)) {
+        $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, $view)
+        try {
+            $key = $base.OpenSubKey($subKey, $false)
+            if ($null -ne $key) { $key.Dispose(); return $true }
+        }
+        finally { $base.Dispose() }
+    }
+    return $false
+}
+
+function Assert-LocalPackageFingerprint {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][int64]$Size,
+        [Parameter(Mandatory)][string]$Sha256,
+        [Parameter(Mandatory)][string]$PackageCode,
+        [Parameter(Mandatory)][string]$Description
+    )
+    $installerRoot = [IO.Path]::GetFullPath($script:installerRoot).TrimEnd('\')
+    $fullPath = [IO.Path]::GetFullPath($Path)
+    Assert-Condition ([IO.Path]::GetDirectoryName($fullPath).Equals($installerRoot, [StringComparison]::OrdinalIgnoreCase)) "$Description is outside the fixed Windows Installer cache root."
+    Assert-LeafFingerprint $fullPath $Size $Sha256 '' $Description
+    Assert-PrivilegedPathAcl $fullPath "$Description protected file"
+    $identity = Get-MsiIdentity $fullPath
+    Assert-Condition ($identity.package_code -ceq $PackageCode) "$Description PackageCode mismatch."
+}
+
+function Assert-NoBroadWriteAcl {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Description
+    )
+    Assert-PrivilegedPathAcl $Path $Description
+}
+
+function Get-ValidatedOrphanPackageCache {
+    param(
+        [Parameter(Mandatory)]$Cache,
+        [Parameter(Mandatory)][string]$Phase
+    )
+    $packageCacheRoot = [IO.Path]::GetFullPath((Join-Path $programData 'Package Cache')).TrimEnd('\')
+    $packageCacheRootItem = Get-Item -LiteralPath $packageCacheRoot -Force
+    Assert-Condition (($packageCacheRootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) "$Phase Package Cache root is a reparse point."
+    Assert-NoBroadWriteAcl $packageCacheRoot "$Phase Package Cache root"
+    $directory = [IO.Path]::GetFullPath((Join-Path $packageCacheRoot ([string]$Cache.directoryName)))
+    Assert-Condition ([IO.Path]::GetDirectoryName($directory).Equals($packageCacheRoot, [StringComparison]::OrdinalIgnoreCase)) "$Phase orphan cache directory escaped the fixed Package Cache root."
+    if (-not (Test-Path -LiteralPath $directory)) {
+        return [pscustomobject][ordered]@{ present = $false; directory = $directory; file = $null }
+    }
+    Assert-Condition (Test-Path -LiteralPath $directory -PathType Container) "$Phase orphan package cache path exists but is not a directory."
+    $directoryItem = Get-Item -LiteralPath $directory -Force
+    Assert-Condition (($directoryItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) "$Phase orphan package cache directory is a reparse point."
+    Assert-NoBroadWriteAcl $directory "$Phase orphan package cache directory"
+    Assert-Condition (@(Get-ChildItem -LiteralPath $directory -Directory -Force).Count -eq 0) "$Phase orphan package cache contains a nested directory."
+    $files = @(Get-ChildItem -LiteralPath $directory -File -Force)
+    Assert-Condition ($files.Count -eq 1 -and $files[0].Name -ceq [string]$Cache.payload.fileName) "$Phase orphan package cache is not the exact single-file layout."
+    Assert-Condition (($files[0].Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) "$Phase orphan package cache MSI is a reparse point."
+    Assert-NoBroadWriteAcl $files[0].FullName "$Phase orphan package cache MSI"
+    Assert-LeafFingerprint $files[0].FullName ([int64]$Cache.payload.sizeBytes) $Cache.payload.sha256 '' "$Phase orphan package cache MSI"
+    $identity = Get-MsiIdentity $files[0].FullName
+    Assert-Condition ($identity.product_code -ceq [string]$Cache.productCode -and $identity.package_code -ceq [string]$Cache.packageCode -and $identity.upgrade_code -ceq [string]$Cache.upgradeCode -and $identity.product_version -ceq [string]$Cache.productVersion) "$Phase orphan package cache MSI identity differs from the manifest."
+    return [pscustomobject][ordered]@{ present = $true; directory = $directory; file = $files[0] }
+}
+
+function Assert-RecoveryMachinePreflight {
+    if ($null -eq $campaign.recovery) { return }
+    $record = $campaign.recovery.manifest.runtimeMsi
+    Assert-RecoveryProductInstalledDefault $record.productCode
+    $installedVersion = Get-InstalledProductVersion $record.productCode
+    Assert-Condition (-not [string]::IsNullOrWhiteSpace($installedVersion) -and $installedVersion -ceq [string]$campaign.recovery.manifest.expectedInstalled.productVersion) "Recovery installed ProductVersion differs from the exact incident state: $installedVersion"
+    $null = Assert-ServiceConfiguration
+    Assert-LeafFingerprint $campaign.paths.service_exe ([int64]$approvedRecoveryExistingService.size) $approvedRecoveryExistingService.sha256 $approvedRecoveryExistingService.authenticodeStatus 'code-approved pre-recovery activation service executable'
+    $null = Assert-NoOwnedSystemObjects 'pre-recovery'
+    foreach ($bundleKey in @($campaign.recovery.manifest.orphanBundleProviderKeys)) {
+        Assert-Condition ((Get-BundleRegistration $bundleKey).Count -eq 0) "Recovery preflight found the orphan Bundle registered: $bundleKey"
+        Assert-Condition (-not (Test-DependencyProvider $bundleKey)) "Recovery preflight found the orphan Bundle dependency provider: $bundleKey"
+        $bundleCache = [IO.Path]::GetFullPath((Join-Path $campaign.paths.package_cache_root $bundleKey))
+        Assert-Condition ([IO.Path]::GetDirectoryName($bundleCache).Equals([IO.Path]::GetFullPath($campaign.paths.package_cache_root).TrimEnd('\'), [StringComparison]::OrdinalIgnoreCase)) 'Recovery Bundle cache escaped Package Cache root.'
+        Assert-Condition (-not (Test-Path -LiteralPath $bundleCache)) "Recovery preflight found an unapproved orphan Bundle cache: $bundleCache"
+    }
+    foreach ($cache in @($campaign.recovery.manifest.orphanPackageCaches)) {
+        $state = Get-ProductState $cache.productCode
+        if ([string]$cache.productCode -ceq [string]$record.productCode) {
+            Assert-Condition ($state -eq 5) "Recovery Runtime cache ProductCode is not INSTALLSTATE_DEFAULT: $state"
+        }
+        else {
+            Assert-Condition ($state -eq -1) "Recovery preflight found an old ProductCode registered: $($cache.productCode); state $state"
+            Assert-Condition ((Get-RelatedProducts $cache.upgradeCode) -notcontains [string]$cache.productCode) "Recovery preflight found an old ProductCode in its UpgradeCode family: $($cache.productCode)"
+        }
+        Assert-Condition (-not (Test-DependencyProvider $cache.dependencyProviderKey)) "Recovery preflight found an orphan package dependency provider: $($cache.dependencyProviderKey)"
+        $null = Get-ValidatedOrphanPackageCache $cache 'recovery preflight'
+    }
+}
+
+function Remove-ExactOrphanPackageCaches {
+    if ($null -eq $campaign.recovery) { return @() }
+    $removed = @()
+    foreach ($bundleKey in @($campaign.recovery.manifest.orphanBundleProviderKeys)) {
+        Assert-Condition ((Get-BundleRegistration $bundleKey).Count -eq 0) "Orphan Bundle provider is still registered: $bundleKey"
+        Assert-Condition (-not (Test-DependencyProvider $bundleKey)) "Orphan Bundle dependency provider is still registered: $bundleKey"
+    }
+    foreach ($cache in @($campaign.recovery.manifest.orphanPackageCaches)) {
+        Assert-Condition ((Get-ProductState $cache.productCode) -eq -1) "Orphan cache ProductCode is still registered: $($cache.productCode)"
+        Assert-Condition ((Get-RelatedProducts $cache.upgradeCode) -notcontains [string]$cache.productCode) "Orphan cache ProductCode remains in its UpgradeCode family: $($cache.productCode)"
+        Assert-Condition (-not (Test-DependencyProvider $cache.dependencyProviderKey)) "Orphan package dependency provider is still registered: $($cache.dependencyProviderKey)"
+        $inspection = Get-ValidatedOrphanPackageCache $cache 'post-uninstall cleanup'
+        if (-not [bool]$inspection.present) {
+            $removed += [ordered]@{ directory = [string]$inspection.directory; outcome = 'already-absent' }
+            continue
+        }
+        # Recheck immediately before a narrow move into the administrator-only
+        # stage. Once moved, deletion no longer races a user-writable location.
+        $freshInspection = Get-ValidatedOrphanPackageCache $cache 'immediate pre-removal recheck'
+        Assert-Condition ([bool]$freshInspection.present) 'Orphan package cache disappeared during the removal boundary.'
+        $directory = [string]$freshInspection.directory
+        $freshItem = $freshInspection.file
+        $quarantinePath = Join-Path $stagePayloadRoot ("orphan-cache-{0}.msi" -f ([Guid]::NewGuid().ToString('N')))
+        Move-Item -LiteralPath $freshItem.FullName -Destination $quarantinePath
+        Assert-LeafFingerprint $quarantinePath ([int64]$cache.payload.sizeBytes) $cache.payload.sha256 '' 'quarantined orphan package cache MSI'
+        $quarantineIdentity = Get-MsiIdentity $quarantinePath
+        Assert-Condition ($quarantineIdentity.product_code -ceq [string]$cache.productCode -and $quarantineIdentity.package_code -ceq [string]$cache.packageCode) 'Quarantined orphan cache identity changed.'
+        Remove-Item -LiteralPath $quarantinePath -Force
+        Remove-Item -LiteralPath $directory -Force
+        Assert-Condition (-not (Test-Path -LiteralPath $directory)) 'Exact orphan package cache removal did not complete.'
+        $removed += [ordered]@{ directory = $directory; outcome = 'removed'; payload_sha256 = [string]$cache.payload.sha256 }
+    }
+    return @($removed)
+}
+
+function Get-BundleRegistration {
+    param([Parameter(Mandatory)][string]$BundleProviderKey)
+    $subKey = "SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\$BundleProviderKey"
+    $records = @()
+    foreach ($view in @([Microsoft.Win32.RegistryView]::Registry64, [Microsoft.Win32.RegistryView]::Registry32)) {
+        $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, $view)
+        try {
+            $key = $base.OpenSubKey($subKey, $false)
+            if ($null -eq $key) { continue }
+            try {
+                $rawUpgrade = $key.GetValue('BundleUpgradeCode', $null)
+                $upgrades = if ($rawUpgrade -is [Array]) { @($rawUpgrade | ForEach-Object { [string]$_ }) } elseif ($null -ne $rawUpgrade) { @([string]$rawUpgrade) } else { @() }
+                $records += [pscustomobject][ordered]@{
+                    registry_view = $view.ToString()
+                    display_version = [string]$key.GetValue('DisplayVersion', $null)
+                    cache_path = [string]$key.GetValue('BundleCachePath', $null)
+                    upgrade_codes = @($upgrades)
+                }
+            }
+            finally { $key.Dispose() }
+        }
+        finally { $base.Dispose() }
+    }
+    return @($records)
+}
+
+function Invoke-InstallerProcess {
+    param(
+        [Parameter(Mandatory)][string]$FilePath,
+        [Parameter(Mandatory)][string[]]$Arguments,
+        [Parameter(Mandatory)][string]$Description
+    )
+    Assert-Condition (-not (Test-Path -LiteralPath $campaign.paths.active_marker)) "active-lease.json exists before $Description."
+    $process = Microsoft.PowerShell.Management\Start-Process -FilePath $FilePath -ArgumentList $Arguments -Wait -PassThru -WindowStyle Hidden
+    Add-Step $Description "exit-$($process.ExitCode)" ($Arguments -join ' ')
+    return $process.ExitCode
+}
+
+function Assert-MsiRecordIdentity {
+    param(
+        [Parameter(Mandatory)]$Record,
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Description
+    )
+    Assert-LeafFingerprint $Path ([int64]$Record.size) $Record.sha256 $Record.authenticode_status $Description
+    $identity = Get-MsiIdentity $Path
+    Assert-Condition ($identity.product_code -ceq [string]$Record.product_code) "$Description ProductCode mismatch."
+    Assert-Condition ($identity.package_code -ceq [string]$Record.package_code) "$Description PackageCode mismatch."
+    Assert-Condition ($identity.upgrade_code -ceq [string]$Record.upgrade_code) "$Description UpgradeCode mismatch."
+    Assert-Condition ($identity.product_version -ceq [string]$Record.product_version) "$Description ProductVersion mismatch."
+}
+
+function Assert-RuntimeAbsent {
+    Assert-Condition ((Get-RelatedProducts $campaign.fixed.RuntimeUpgradeCode).Count -eq 0) 'A Runtime MSI remains in the fixed UpgradeCode family.'
+    Assert-Condition ($null -eq (Get-Service -Name $serviceName -ErrorAction SilentlyContinue)) 'Activation service remains installed.'
+    Assert-Condition (-not (Test-Path -LiteralPath $campaign.paths.runtime_root)) 'Runtime Program Files root remains.'
+    Assert-Condition (-not (Test-Path -LiteralPath $campaign.paths.runtime_data_root)) 'Runtime ProgramData root remains.'
+    Assert-Condition (-not (Test-Path -LiteralPath $campaign.paths.runtime_seed_key)) 'Runtime installer seed remains.'
+}
+
+function Assert-AppAbsent {
+    Assert-Condition ((Get-RelatedProducts $campaign.fixed.AppUpgradeCode).Count -eq 0) 'An App MSI remains in the fixed UpgradeCode family.'
+    Assert-Condition (-not (Test-Path -LiteralPath $campaign.paths.app_root)) 'App Program Files root remains.'
+}
+
+function Get-TaskFolderState {
+    $scheduler = New-Object -ComObject 'Schedule.Service'
+    try {
+        $scheduler.Connect()
+        try { $folder = $scheduler.GetFolder('\DistractionFirewall') }
+        catch [Runtime.InteropServices.COMException] {
+            if ($_.Exception.HResult -in @(-2147024894, -2147023728)) {
+                return [pscustomobject][ordered]@{ exists = $false; task_count = 0; folder_count = 0 }
+            }
+            throw
+        }
+        try {
+            return [pscustomobject][ordered]@{
+                exists = $true
+                task_count = @($folder.GetTasks(1)).Count
+                folder_count = @($folder.GetFolders(0)).Count
+            }
+        }
+        finally { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($folder) }
+    }
+    finally { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($scheduler) }
+}
+
+function Get-WfpOwnedState {
+    param([Parameter(Mandatory)][string]$EvidenceName)
+    $providerKey = [Guid]'f04e437b-4c16-49ca-8e6c-4d9471d6b509'
+    $subLayerKey = [Guid]'60dc8631-a160-420b-ae90-d1b461efe293'
+    $filterXml = Join-Path $stageScratchRoot "$EvidenceName-wfp-filters.xml"
+    try {
+        $process = Microsoft.PowerShell.Management\Start-Process -FilePath $netsh -ArgumentList @('wfp', 'show', 'filters', ("file={0}" -f $filterXml), 'verbose=on') -Wait -PassThru -WindowStyle Hidden
+        Assert-Condition ($process.ExitCode -eq 0 -and (Test-Path -LiteralPath $filterXml -PathType Leaf)) 'netsh WFP filter inventory failed.'
+        $providerText = $providerKey.ToString('D')
+        $subLayerText = $subLayerKey.ToString('D')
+        $ownedReferences = @(Select-String -LiteralPath $filterXml -Pattern $providerText, $subLayerText -SimpleMatch)
+        return [pscustomobject][ordered]@{
+            provider_exists = [DistractionFirewall.LiveValidation.NativeInspection]::WfpProviderExists($providerKey)
+            sublayer_exists = [DistractionFirewall.LiveValidation.NativeInspection]::WfpSubLayerExists($subLayerKey)
+            owned_filter_reference_count = $ownedReferences.Count
+            inventory_sha256 = Get-LowerSha256 $filterXml
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $filterXml -PathType Leaf) { Remove-Item -LiteralPath $filterXml -Force }
+    }
+}
+
+function Assert-NoOwnedSystemObjects {
+    param([Parameter(Mandatory)][string]$EvidenceName)
+    $task = Get-TaskFolderState
+    Assert-Condition (-not [bool]$task.exists) 'Scheduled Task folder \DistractionFirewall remains.'
+    $wfp = Get-WfpOwnedState $EvidenceName
+    Assert-Condition (-not [bool]$wfp.provider_exists -and -not [bool]$wfp.sublayer_exists -and [int]$wfp.owned_filter_reference_count -eq 0) 'Owned WFP provider/sublayer/filter residual remains.'
+    return [pscustomobject][ordered]@{ scheduled_task_folder = $task; wfp = $wfp }
+}
+
+function Assert-ProtectedRuntimeServicePath {
+    $programFiles = [IO.Path]::GetFullPath([Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)).TrimEnd('\')
+    $runtimeRoot = [IO.Path]::GetFullPath([string]$campaign.paths.runtime_root).TrimEnd('\')
+    $activationRoot = [IO.Path]::GetFullPath([IO.Path]::GetDirectoryName([string]$campaign.paths.service_exe)).TrimEnd('\')
+    $servicePath = [IO.Path]::GetFullPath([string]$campaign.paths.service_exe)
+    Assert-Condition ([IO.Path]::GetDirectoryName($runtimeRoot).Equals($programFiles, [StringComparison]::OrdinalIgnoreCase)) 'Runtime root escaped native Program Files.'
+    Assert-Condition ([IO.Path]::GetDirectoryName($activationRoot).Equals($runtimeRoot, [StringComparison]::OrdinalIgnoreCase)) 'Activation-service root escaped the fixed Runtime root.'
+    Assert-Condition ([IO.Path]::GetDirectoryName($servicePath).Equals($activationRoot, [StringComparison]::OrdinalIgnoreCase)) 'Activation-service executable escaped its fixed directory.'
+    foreach ($path in @($programFiles, $runtimeRoot, $activationRoot, $servicePath)) {
+        Assert-Condition (Test-Path -LiteralPath $path) "Protected Runtime service path is missing: $path"
+        $item = Get-Item -LiteralPath $path -Force
+        Assert-Condition (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) "Protected Runtime service path is a reparse point: $path"
+        Assert-PrivilegedPathAcl $path 'protected Runtime service path'
+    }
+}
+
+function Assert-ServiceConfiguration {
+    $service = CimCmdlets\Get-CimInstance -ClassName Win32_Service -Filter "Name='$serviceName'" -ErrorAction Stop
+    Assert-Condition ($null -ne $service) 'Activation service is missing.'
+    $expectedCommand = '"' + [string]$campaign.paths.service_exe + '" --service'
+    Assert-Condition ([string]$service.PathName -ceq $expectedCommand) 'Activation service command is not the fixed quoted command.'
+    Assert-Condition ([string]$service.StartName -ceq 'LocalSystem') 'Activation service is not LocalSystem.'
+    Assert-Condition ([string]$service.StartMode -ceq 'Auto' -and [string]$service.State -ceq 'Running') 'Activation service is not running/automatic.'
+    Assert-Condition ([string]$service.ServiceType -ceq 'Own Process' -and [uint32]$service.ProcessId -gt 0) 'Activation service is not a running own-process service.'
+    $serviceProcess = CimCmdlets\Get-CimInstance -ClassName Win32_Process -Filter ("ProcessId={0}" -f [uint32]$service.ProcessId) -ErrorAction Stop
+    Assert-Condition ($null -ne $serviceProcess -and [IO.Path]::GetFullPath([string]$serviceProcess.ExecutablePath).Equals([IO.Path]::GetFullPath([string]$campaign.paths.service_exe), [StringComparison]::OrdinalIgnoreCase)) 'Activation service process image is not the fixed service executable.'
+    Assert-ProtectedRuntimeServicePath
+    $serviceExecutable = Get-Item -LiteralPath $campaign.paths.service_exe -Force
+    Assert-Condition (($serviceExecutable.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) 'Activation service executable is a reparse point.'
+    $serviceKey = "Registry::HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\$serviceName"
+    Assert-Condition ([int](Get-ItemPropertyValue -LiteralPath $serviceKey -Name 'DelayedAutostart' -ErrorAction Stop) -eq 1) 'Delayed automatic start is not enabled.'
+    $failure = [DistractionFirewall.LiveValidation.NativeInspection]::ReadFailureActions($serviceName)
+    Assert-Condition ($failure.ResetPeriodSeconds -eq 86400) 'Failure-action reset period is not one day.'
+    Assert-Condition (($failure.ActionTypes -join ',') -ceq '1,1,1') 'Failure actions are not three service restarts.'
+    Assert-Condition (($failure.ActionDelaysMilliseconds -join ',') -ceq '5000,5000,5000') 'Failure-action delays are not three 5-second delays.'
+    Assert-Condition $failure.ApplyOnNonCrashFailures 'Failure actions do not apply to returned-error failures.'
+    $seed = Get-ItemProperty -LiteralPath $campaign.paths.runtime_seed_key -ErrorAction Stop
+    Assert-Condition ([string]$seed.OwnerSid -ceq [string]$campaign.owner_sid) 'Runtime owner SID seed differs from the campaign owner.'
+    Assert-Condition ([string]$seed.ProductInstanceId -ceq [string]$campaign.fixed.ProductInstanceId) 'Runtime ProductInstanceId seed differs from the fixed value.'
+    Assert-Condition ([IO.Path]::GetFullPath([string]$seed.DataRoot).TrimEnd('\').Equals([IO.Path]::GetFullPath([string]$campaign.paths.runtime_data_root).TrimEnd('\'), [StringComparison]::OrdinalIgnoreCase)) 'Runtime DataRoot seed differs from the fixed path.'
+    return [pscustomobject][ordered]@{
+        name = $serviceName
+        state = [string]$service.State
+        start_mode = [string]$service.StartMode
+        account = [string]$service.StartName
+        command = [string]$service.PathName
+        process_id = [uint32]$service.ProcessId
+        process_executable_path = [string]$serviceProcess.ExecutablePath
+        executable_sha256 = Get-LowerSha256 $serviceExecutable.FullName
+        delayed_auto_start = $true
+        failure_reset_seconds = $failure.ResetPeriodSeconds
+        failure_action_types = @($failure.ActionTypes)
+        failure_action_delays_ms = @($failure.ActionDelaysMilliseconds)
+        failure_actions_on_non_crash = $failure.ApplyOnNonCrashFailures
+    }
+}
+
+function Copy-ProtectedCleanupDiagnostic {
+    param([Parameter(Mandatory)][string]$StageName)
+    # The product owns exactly this secret-free diagnostic name. Absence is
+    # normal. The path is fixed; no wildcard discovery is permitted here.
+    $diagnosticPath = Join-Path $campaign.paths.runtime_data_root 'cleanup-failure.json'
+    if (-not (Test-Path -LiteralPath $diagnosticPath -PathType Leaf)) { return $null }
+    $item = Get-Item -LiteralPath $diagnosticPath -Force
+    Assert-Condition (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) 'Cleanup diagnostic is a reparse point.'
+    Assert-Condition ($item.Length -le 1048576) 'Cleanup diagnostic exceeds the fixed 1 MiB limit.'
+    $diagnostic = Get-Content -LiteralPath $diagnosticPath -Raw | ConvertFrom-Json
+    $expectedProperties = @('schema_version', 'occurred_at_utc', 'operation', 'stage', 'backend', 'backend_operation', 'exceptions') | Sort-Object
+    $actualProperties = @($diagnostic.PSObject.Properties.Name | Sort-Object)
+    Assert-Condition (-not [bool](Compare-Object -ReferenceObject $expectedProperties -DifferenceObject $actualProperties)) 'Cleanup diagnostic has an unexpected field set.'
+    Assert-Condition ([int]$diagnostic.schema_version -eq 1 -and [string]$diagnostic.operation -ceq 'runtime-installation-cleanup') 'Cleanup diagnostic schema/operation mismatch.'
+    Assert-Condition ([string]$diagnostic.stage -cin @('resolve-installed-paths', 'verify-execution-identity', 'verify-inactive-lease', 'resolve-product-identity', 'create-cleanup-backends', 'remove-owned-installation-resources')) 'Cleanup diagnostic stage is invalid.'
+    Assert-Condition ($null -eq $diagnostic.backend -or [string]$diagnostic.backend -cin @('windows-wfp-infrastructure', 'windows-task-scheduler-infrastructure')) 'Cleanup diagnostic backend is invalid.'
+    Assert-Condition ($null -eq $diagnostic.backend_operation -or [string]$diagnostic.backend_operation -cin @('preflight-validation', 'compare-and-delete')) 'Cleanup diagnostic backend operation is invalid.'
+    Assert-Condition (@($diagnostic.exceptions).Count -ge 1 -and @($diagnostic.exceptions).Count -le 8) 'Cleanup diagnostic exception chain is invalid.'
+    foreach ($exception in @($diagnostic.exceptions)) {
+        Assert-Condition ([string]$exception.type -cmatch '^[A-Za-z0-9_.+`]+$' -and [string]$exception.h_result -cmatch '^0x[0-9A-F]{8}$') 'Cleanup diagnostic exception descriptor is invalid.'
+    }
+    $destination = Join-Path $stageEvidenceRoot "$StageName-installation-cleanup-diagnostic.json"
+    Copy-Item -LiteralPath $diagnosticPath -Destination $destination
+    return [pscustomobject][ordered]@{
+        source_path = $diagnosticPath
+        evidence_name = [IO.Path]::GetFileName($destination)
+        size = $item.Length
+        sha256 = Get-LowerSha256 $destination
+    }
+}
+
+function Assert-RecoveryProductInstalledDefault {
+    param([Parameter(Mandatory)][string]$ProductCode)
+    $productState = Get-ProductState $ProductCode
+    Assert-Condition ($productState -eq 5) "Recovery requires exact ProductCode $ProductCode in INSTALLSTATE_DEFAULT; observed state $productState."
+}
+
+function Invoke-RecoveryIfPresent {
+    if ($null -eq $campaign.recovery) {
+        Assert-RuntimeAbsent
+        Assert-AppAbsent
+        return $null
+    }
+    Assert-ApprovedRecoveryCampaign
+    Assert-AppAbsent
+    $recovery = $campaign.recovery
+    $record = $recovery.manifest.runtimeMsi
+    Assert-Condition ([string]$record.upgradeCode -ceq [string]$campaign.fixed.RuntimeUpgradeCode) 'Recovery MSI left the fixed Runtime UpgradeCode family.'
+    Assert-LeafFingerprint $recovery.manifest_path ([int64]$recovery.manifest_size) $recovery.manifest_sha256 '' 'recovery manifest'
+    Assert-MsiRecordIdentity ([pscustomobject][ordered]@{
+        size = [int64]$record.size; sha256 = [string]$record.sha256; authenticode_status = [string]$record.authenticodeStatus
+        product_code = [string]$record.productCode; package_code = [string]$record.packageCode
+        upgrade_code = [string]$record.upgradeCode; product_version = [string]$record.productVersion
+    }) $recovery.msi_path 'recovery MSI source'
+    $related = @(Get-RelatedProducts $campaign.fixed.RuntimeUpgradeCode)
+    Assert-Condition (@($related | Where-Object { $_ -cne [string]$record.productCode }).Count -eq 0) 'An unapproved Runtime ProductCode is registered.'
+    Assert-Condition ([string]$recovery.manifest.mode -ceq 'repair_then_uninstall') 'Recovery mode is not the single code-approved mode.'
+    Assert-Condition ($related.Count -eq 1 -and $related[0] -ceq [string]$record.productCode) 'Recovery requires the exact Runtime ProductCode to be registered.'
+    Assert-RecoveryProductInstalledDefault $record.productCode
+
+    $preRecoveryLocalPackage = Get-LocalPackage $record.productCode
+    Assert-Condition (-not [string]::IsNullOrWhiteSpace($preRecoveryLocalPackage)) 'Registered recovery ProductCode has no Windows Installer LocalPackage.'
+    Assert-LocalPackageFingerprint $preRecoveryLocalPackage ([int64]$recovery.manifest.expectedInstalled.localPackage.sizeBytes) $recovery.manifest.expectedInstalled.localPackage.sha256 $recovery.manifest.expectedInstalled.packageCode 'pre-recovery Windows Installer LocalPackage'
+    Assert-RecoveryMachinePreflight
+
+    $preDiagnostic = Copy-ProtectedCleanupDiagnostic 'pre-recovery'
+    $stagedRecovery = Join-Path $stagePayloadRoot 'recovery-runtime.msi'
+    Copy-Item -LiteralPath $recovery.msi_path -Destination $stagedRecovery
+    Assert-MsiRecordIdentity ([pscustomobject][ordered]@{
+        size = [int64]$record.size; sha256 = [string]$record.sha256; authenticode_status = [string]$record.authenticodeStatus
+        product_code = [string]$record.productCode; package_code = [string]$record.packageCode
+        upgrade_code = [string]$record.upgradeCode; product_version = [string]$record.productVersion
+    }) $stagedRecovery 'staged recovery MSI'
+    $repairLog = Join-Path $stageEvidenceRoot 'recovery-recache.log'
+    $repairArguments = @('/i', ('"{0}"' -f $stagedRecovery), 'REINSTALL=ALL', 'REINSTALLMODE=vomus', '/qn', '/norestart', 'REBOOT=ReallySuppress', '/L*v', ('"{0}"' -f $repairLog))
+    $repairExit = Invoke-InstallerProcess $msiexec $repairArguments 'recovery-recache'
+    Assert-Condition ($repairExit -eq 0) "Recovery recache failed with exit $repairExit."
+    Assert-Condition ((Get-ProductState $record.productCode) -eq 5) 'Recovery MSI did not reach INSTALLSTATE_DEFAULT.'
+    $recachedLocalPackage = Get-LocalPackage $record.productCode
+    Assert-Condition (-not [string]::IsNullOrWhiteSpace($recachedLocalPackage)) 'Recached Runtime has no Windows Installer LocalPackage.'
+    Assert-LocalPackageFingerprint $recachedLocalPackage ([int64]$record.size) $record.sha256 $record.packageCode 'recached Windows Installer LocalPackage'
+
+    $uninstallLog = Join-Path $stageEvidenceRoot 'recovery-uninstall.log'
+    $uninstallExit = Invoke-InstallerProcess $msiexec @('/x', [string]$record.productCode, '/qn', '/norestart', 'REBOOT=ReallySuppress', '/L*v', ('"{0}"' -f $uninstallLog)) 'recovery-uninstall'
+    if ($uninstallExit -ne 0) {
+        $null = Copy-ProtectedCleanupDiagnostic 'failed-recovery-uninstall'
+        throw "Recovery Runtime uninstall failed with exit $uninstallExit."
+    }
+    Assert-RuntimeAbsent
+    foreach ($localPackage in @($preRecoveryLocalPackage, $recachedLocalPackage) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Sort-Object -Unique) {
+        Assert-Condition (-not (Test-Path -LiteralPath $localPackage)) "Windows Installer LocalPackage remains after exact Runtime uninstall: $localPackage"
+    }
+    $orphanCacheEvidence = @(Remove-ExactOrphanPackageCaches)
+    Add-Step 'recovery-verified-absent' 'passed' ([string]$record.productCode)
+    return [pscustomobject][ordered]@{
+        incident_id = [string]$recovery.manifest.incidentId
+        mode = [string]$recovery.manifest.mode
+        product_code = [string]$record.productCode
+        preexisting_cleanup_diagnostic = $preDiagnostic
+        recache_exit_code = $repairExit
+        uninstall_exit_code = $uninstallExit
+        pre_recovery_local_package = $preRecoveryLocalPackage
+        recached_local_package = $recachedLocalPackage
+        orphan_package_caches = $orphanCacheEvidence
+    }
+}
+
+function Invoke-CandidateUninstall {
+    $errors = [Collections.Generic.List[string]]::new()
+    $setupLog = Join-Path $stageEvidenceRoot 'candidate-burn-uninstall.log'
+    $setupExit = Invoke-InstallerProcess (Join-Path $stagePayloadRoot 'candidate-setup.exe') @('/uninstall', '/quiet', '/norestart', ('/log={0}' -f $setupLog)) 'candidate-burn-uninstall'
+    if ($setupExit -ne 0) { $errors.Add("Burn uninstall exit $setupExit") }
+
+    foreach ($record in @($campaign.candidate.app_msi, $campaign.candidate.runtime_msi)) {
+        if ((Get-ProductState $record.product_code) -eq 5) {
+            $role = if ([string]$record.product_code -ceq [string]$campaign.candidate.app_msi.product_code) { 'app' } else { 'runtime' }
+            $fallbackLog = Join-Path $stageEvidenceRoot "candidate-$role-exact-fallback-uninstall.log"
+            $exitCode = Invoke-InstallerProcess $msiexec @('/x', [string]$record.product_code, '/qn', '/norestart', 'REBOOT=ReallySuppress', '/L*v', ('"{0}"' -f $fallbackLog)) "candidate-$role-exact-fallback-uninstall"
+            if ($exitCode -ne 0) {
+                if ($role -ceq 'runtime') { $null = Copy-ProtectedCleanupDiagnostic 'failed-candidate-runtime-uninstall' }
+                $errors.Add("Exact $role MSI fallback uninstall exit $exitCode")
+            }
+        }
+    }
+    foreach ($message in $errors) { $cleanupErrors.Add($message) }
+    return [pscustomobject][ordered]@{
+        burn_exit_code = $setupExit
+        fallback_errors = @($errors)
+    }
+}
+
+function Assert-CandidatePackageStatePreflight {
+    $packageCacheRoot = [IO.Path]::GetFullPath((Join-Path $programData 'Package Cache')).TrimEnd('\')
+    Assert-Condition ([IO.Path]::GetFullPath([string]$campaign.paths.package_cache_root).TrimEnd('\').Equals($packageCacheRoot, [StringComparison]::OrdinalIgnoreCase)) 'Candidate Package Cache root differs from the fixed CommonApplicationData path.'
+    Assert-Condition (Test-Path -LiteralPath $packageCacheRoot) 'Candidate Package Cache root is missing; secure root creation is outside this campaign.'
+    Assert-Condition (Test-Path -LiteralPath $packageCacheRoot -PathType Container) 'Candidate Package Cache root exists but is not a directory.'
+    $packageCacheRootItem = Get-Item -LiteralPath $packageCacheRoot -Force
+    Assert-Condition (($packageCacheRootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) 'Candidate Package Cache root is a reparse point.'
+    Assert-NoBroadWriteAcl $packageCacheRoot 'candidate Package Cache root'
+    Assert-Condition ((Get-BundleRegistration $campaign.candidate.setup.bundle_provider_key).Count -eq 0) 'Candidate Bundle is already registered.'
+    Assert-Condition (-not (Test-DependencyProvider $campaign.candidate.setup.bundle_provider_key)) 'Candidate Bundle dependency provider already exists.'
+    foreach ($record in @($campaign.candidate.app_msi, $campaign.candidate.runtime_msi)) {
+        Assert-Condition ((Get-ProductState $record.product_code) -eq -1) "Candidate ProductCode is already registered or in a non-absent state: $($record.product_code)"
+        $providerKey = "{0}_v{1}" -f $record.product_code, $record.product_version
+        Assert-Condition (-not (Test-DependencyProvider $providerKey)) "Candidate MSI dependency provider already exists: $providerKey"
+        $cacheDirectory = Join-Path $packageCacheRoot ("{0}v{1}" -f $record.product_code, $record.product_version)
+        Assert-Condition (-not (Test-Path -LiteralPath $cacheDirectory)) "Candidate Package Cache directory already exists: $cacheDirectory"
+    }
+    $bundleCacheDirectory = Join-Path $packageCacheRoot ([string]$campaign.candidate.setup.bundle_provider_key)
+    Assert-Condition (-not (Test-Path -LiteralPath $bundleCacheDirectory)) 'Candidate Bundle Package Cache directory already exists.'
+}
+
+trap {
+    $fatalMessage = $_.Exception.Message
+    $fatalTeardownError = $null
+    if ($script:stageCreatedByCampaign) {
+        try {
+            Remove-VerifiedStageTree $stageRoot
+            $script:stageCreatedByCampaign = $false
+        }
+        catch { $fatalTeardownError = $_.Exception.Message }
+    }
+    try {
+        if (Test-Path -LiteralPath $returnedEvidenceRoot -PathType Container) {
+            $fatalPath = Join-Path $returnedEvidenceRoot 'fatal-error.json'
+            if (-not (Test-Path -LiteralPath $fatalPath)) {
+                Write-NewJson $fatalPath ([ordered]@{
+                    schema = 'distraction-firewall/live-validation-fatal/v1'
+                    campaign_id = [string]$campaign.campaign_id
+                    outcome = 'failed'
+                    recorded_at_utc = [DateTime]::UtcNow.ToString('o')
+                    error = $fatalMessage
+                    protected_stage_teardown_error = $fatalTeardownError
+                    lease_started = $false
+                })
+            }
+        }
+    }
+    catch { }
+    [Console]::Error.WriteLine("Fatal live-validation error: $fatalMessage; protected stage teardown: $fatalTeardownError")
+    exit 1
+}
+
+Assert-Condition ([string]$campaign.schema -ceq 'distraction-firewall/live-validation-campaign/v1') 'Embedded campaign schema is unsupported.'
+Assert-Condition ([Environment]::Is64BitOperatingSystem -and [Environment]::Is64BitProcess) 'Elevated phase requires native x64 Windows PowerShell.'
+Assert-Condition ($PSVersionTable.PSEdition -ceq 'Desktop' -and $PSVersionTable.PSVersion.Major -eq 5) 'Elevated phase requires Windows PowerShell 5.1.'
+$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+$principal = [Security.Principal.WindowsPrincipal]::new($identity)
+Assert-Condition $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) 'Elevated phase did not receive an administrator token.'
+Assert-Condition ($identity.User.Value -ceq [string]$campaign.owner_sid) 'Over-the-shoulder elevation is unsupported: elevated SID differs from campaign owner SID.'
+Assert-Condition ([Environment]::OSVersion.Version.Major -ge 10 -and [Environment]::OSVersion.Version.Build -ge 22000) 'Live validation requires Windows 11.'
+$nativeWindowsPowerShell = [IO.Path]::Combine($trustedPowerShellHome, 'powershell.exe')
+$currentPowerShellPath = [IO.Path]::GetFullPath([Diagnostics.Process]::GetCurrentProcess().MainModule.FileName)
+Assert-Condition ($currentPowerShellPath.Equals($nativeWindowsPowerShell, [StringComparison]::OrdinalIgnoreCase)) 'Elevated phase was not launched by the fixed native Windows PowerShell executable.'
+Assert-TrustedSystemBinary $nativeWindowsPowerShell 'native Windows PowerShell 5.1'
+Assert-TrustedSystemBinary $msiexec 'native Windows Installer client'
+Assert-TrustedSystemBinary $netsh 'native netsh'
+Assert-Condition ([IO.Path]::GetDirectoryName($installerRoot).Equals($windowsDirectory, [StringComparison]::OrdinalIgnoreCase)) 'Windows Installer cache root escaped the native Windows directory.'
+Assert-Condition (Test-Path -LiteralPath $installerRoot -PathType Container) 'Windows Installer cache root is missing.'
+$installerRootItem = Microsoft.PowerShell.Management\Get-Item -LiteralPath $installerRoot -Force
+Assert-Condition (($installerRootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) 'Windows Installer cache root is a reparse point.'
+Assert-PrivilegedPathAcl $installerRoot 'Windows Installer cache root'
+Assert-Condition (Test-Path -LiteralPath $campaign.output_root -PathType Container) 'Embedded campaign output root is missing.'
+Assert-Condition (-not (Test-Path -LiteralPath $campaign.paths.active_marker)) 'An active lease exists; elevated validation refuses to mutate Runtime state.'
+Assert-ApprovedRecoveryCampaign
+
+foreach ($artifact in @($campaign.candidate.setup, $campaign.candidate.app_msi, $campaign.candidate.runtime_msi)) {
+    Assert-LeafFingerprint $artifact.path ([int64]$artifact.size) $artifact.sha256 $artifact.authenticode_status 'candidate binary source'
+}
+foreach ($artifact in @($campaign.candidate.sbom, $campaign.candidate.checksums)) {
+    Assert-LeafFingerprint $artifact.path ([int64]$artifact.size) $artifact.sha256 '' 'candidate metadata source'
+}
+foreach ($artifact in @($campaign.candidate.hosted_evidence, $campaign.candidate.subjects, $campaign.candidate.attestation_bundle)) {
+    Assert-LeafFingerprint $artifact.path ([int64]$artifact.size) $artifact.sha256 '' 'candidate provenance payload source'
+}
+Assert-LeafFingerprint $campaign.input_records.candidate_manifest_path ([int64]$campaign.input_records.candidate_manifest_size) $campaign.input_records.candidate_manifest_sha256 '' 'candidate manifest source'
+Assert-LeafFingerprint $campaign.input_records.provenance_envelope_path ([int64]$campaign.input_records.provenance_envelope_size) $campaign.input_records.provenance_envelope_sha256 '' 'provenance envelope source'
+Assert-LeafFingerprint $campaign.input_records.artifact_archive_path ([int64]$campaign.input_records.artifact_archive_size) $campaign.input_records.artifact_archive_sha256 '' 'raw artifact archive'
+Assert-PinnedEvidenceInputs
+$pendingBaselinePath = Join-Path $stateRoot 'pending-rename-baseline.json'
+Assert-Condition (Test-Path -LiteralPath $pendingBaselinePath -PathType Leaf) 'Non-elevated parent did not provide a pending-rename baseline.'
+$pendingRenameBaseline = Get-Content -LiteralPath $pendingBaselinePath -Raw | ConvertFrom-Json
+Assert-PendingRenameEquals $pendingRenameBaseline (Get-PendingRenameSnapshot) 'UAC boundary'
+$systemBaselinePath = Join-Path $stateRoot 'system-baseline.json'
+Assert-Condition (Test-Path -LiteralPath $systemBaselinePath -PathType Leaf) 'Non-elevated parent did not provide a system baseline.'
+$systemBaseline = Get-Content -LiteralPath $systemBaselinePath -Raw | ConvertFrom-Json
+Assert-SystemBaselineEquals $systemBaseline (Get-SystemBaseline) 'UAC boundary'
+
+Assert-Condition (-not (Test-Path -LiteralPath $stageRoot)) 'Fixed campaign stage already exists.'
+New-ProtectedStageDirectory $stageRoot
+$null = New-Item -ItemType Directory -Path $stagePayloadRoot
+$null = New-Item -ItemType Directory -Path $stageEvidenceRoot
+$null = New-Item -ItemType Directory -Path $stageScratchRoot
+
+$recoveryEvidence = $null
+$serviceEvidence = $null
+$smokeEvidence = $null
+$uninstallEvidence = $null
+$ownedSystemPreflight = $null
+$ownedSystemPostflight = $null
+try {
+    $recoveryEvidence = Invoke-RecoveryIfPresent
+    Assert-RuntimeAbsent
+    Assert-AppAbsent
+    $ownedSystemPreflight = Assert-NoOwnedSystemObjects 'pre-candidate'
+    Assert-CandidatePackageStatePreflight
+    Assert-Condition (-not (Test-Path -LiteralPath $campaign.paths.common_start_menu_root)) 'Distraction Firewall common Start Menu folder already exists.'
+    Assert-Condition (-not (Test-Path -LiteralPath $campaign.paths.active_marker)) 'An active lease appeared after recovery.'
+
+    $stagedSetup = Join-Path $stagePayloadRoot 'candidate-setup.exe'
+    $stagedAppMsi = Join-Path $stagePayloadRoot 'candidate-app.msi'
+    $stagedRuntimeMsi = Join-Path $stagePayloadRoot 'candidate-runtime.msi'
+    Copy-Item -LiteralPath $campaign.candidate.setup.path -Destination $stagedSetup
+    Copy-Item -LiteralPath $campaign.candidate.app_msi.path -Destination $stagedAppMsi
+    Copy-Item -LiteralPath $campaign.candidate.runtime_msi.path -Destination $stagedRuntimeMsi
+    Assert-LeafFingerprint $stagedSetup ([int64]$campaign.candidate.setup.size) $campaign.candidate.setup.sha256 $campaign.candidate.setup.authenticode_status 'staged setup'
+    Assert-MsiRecordIdentity $campaign.candidate.app_msi $stagedAppMsi 'staged App MSI'
+    Assert-MsiRecordIdentity $campaign.candidate.runtime_msi $stagedRuntimeMsi 'staged Runtime MSI'
+    Add-Step 'protected-staging' 'passed' $stagePayloadRoot
+
+    $installLog = Join-Path $stageEvidenceRoot 'candidate-burn-install.log'
+    $candidateInstallAttempted = $true
+    $installExit = Invoke-InstallerProcess $stagedSetup @('/install', '/quiet', '/norestart', ('/log={0}' -f $installLog)) 'candidate-burn-install'
+    Assert-Condition ($installExit -eq 0) "Candidate install failed or requested reboot (exit $installExit)."
+    $installedCandidate = $true
+    Assert-Condition ((Get-ProductState $campaign.candidate.app_msi.product_code) -eq 5) 'Candidate App ProductCode is not installed.'
+    Assert-Condition ((Get-ProductState $campaign.candidate.runtime_msi.product_code) -eq 5) 'Candidate Runtime ProductCode is not installed.'
+    Assert-Condition (((Get-RelatedProducts $campaign.fixed.AppUpgradeCode) -join ',') -ceq [string]$campaign.candidate.app_msi.product_code) 'App UpgradeCode family differs from the candidate.'
+    Assert-Condition (((Get-RelatedProducts $campaign.fixed.RuntimeUpgradeCode) -join ',') -ceq [string]$campaign.candidate.runtime_msi.product_code) 'Runtime UpgradeCode family differs from the candidate.'
+    foreach ($record in @($campaign.candidate.app_msi, $campaign.candidate.runtime_msi)) {
+        $localPackage = Get-LocalPackage $record.product_code
+        Assert-Condition (-not [string]::IsNullOrWhiteSpace($localPackage)) "Candidate ProductCode has no LocalPackage: $($record.product_code)"
+        Assert-LocalPackageFingerprint $localPackage ([int64]$record.size) $record.sha256 $record.package_code 'candidate Windows Installer LocalPackage'
+        $candidateLocalPackages += $localPackage
+    }
+    $bundle = @(Get-BundleRegistration $campaign.candidate.setup.bundle_provider_key)
+    Assert-Condition ($bundle.Count -eq 1) 'Candidate Bundle registration is missing or duplicated.'
+    Assert-Condition ([string]$bundle[0].display_version -ceq [string]$campaign.candidate.version) 'Bundle DisplayVersion differs from the candidate.'
+    Assert-Condition (@($bundle[0].upgrade_codes).Count -eq 1 -and [string]$bundle[0].upgrade_codes[0] -ceq [string]$campaign.fixed.BundleUpgradeCode) 'Bundle UpgradeCode differs from the fixed value.'
+    Assert-Condition (-not (Test-Path -LiteralPath $campaign.paths.active_marker)) 'Candidate install created an active lease.'
+    $serviceEvidence = Assert-ServiceConfiguration
+    Add-Step 'candidate-installed-and-validated' 'passed' ([string]$campaign.candidate.version)
+
+    Write-Phase 'awaiting-standard-user-smoke.json' 'awaiting-standard-user-smoke' 'ready' @{
+        service_state = $serviceEvidence.state
+        active_lease_present = $false
+    }
+    $smokeEvidence = Read-SmokePhase
+    Assert-Condition ([string]$smokeEvidence.outcome -ceq 'passed') "Standard-user smoke failed: $($smokeEvidence.error)"
+    Assert-Condition (-not (Test-Path -LiteralPath $campaign.paths.active_marker)) 'An active lease appeared during standard-user smoke.'
+    Add-Step 'standard-user-smoke' 'passed' ([string]$smokeEvidence.owner_sid)
+}
+catch {
+    $campaignError = $_.Exception.Message
+    Add-Step 'campaign-body' 'failed' $campaignError
+}
+finally {
+    try {
+        if ($candidateInstallAttempted -or $installedCandidate -or (Get-ProductState $campaign.candidate.app_msi.product_code) -eq 5 -or (Get-ProductState $campaign.candidate.runtime_msi.product_code) -eq 5 -or (Get-BundleRegistration $campaign.candidate.setup.bundle_provider_key).Count -gt 0) {
+            Assert-Condition (-not (Test-Path -LiteralPath $campaign.paths.active_marker)) 'An active lease blocks safe candidate cleanup.'
+            $uninstallEvidence = Invoke-CandidateUninstall
+        }
+    }
+    catch {
+        $cleanupErrors.Add($_.Exception.Message)
+        Add-Step 'candidate-cleanup' 'failed' $_.Exception.Message
+    }
+}
+
+$residualErrors = [Collections.Generic.List[string]]::new()
+foreach ($check in @(
+    [pscustomobject]@{ Name = 'App ProductCode'; Present = ((Get-ProductState $campaign.candidate.app_msi.product_code) -ne -1) },
+    [pscustomobject]@{ Name = 'Runtime ProductCode'; Present = ((Get-ProductState $campaign.candidate.runtime_msi.product_code) -ne -1) },
+    [pscustomobject]@{ Name = 'Bundle registration'; Present = ((Get-BundleRegistration $campaign.candidate.setup.bundle_provider_key).Count -ne 0) },
+    [pscustomobject]@{ Name = 'Activation service'; Present = ($null -ne (Get-Service -Name $serviceName -ErrorAction SilentlyContinue)) },
+    [pscustomobject]@{ Name = 'App root'; Present = (Test-Path -LiteralPath $campaign.paths.app_root) },
+    [pscustomobject]@{ Name = 'Runtime root'; Present = (Test-Path -LiteralPath $campaign.paths.runtime_root) },
+    [pscustomobject]@{ Name = 'Runtime data root'; Present = (Test-Path -LiteralPath $campaign.paths.runtime_data_root) },
+    [pscustomobject]@{ Name = 'Runtime seed'; Present = (Test-Path -LiteralPath $campaign.paths.runtime_seed_key) },
+    [pscustomobject]@{ Name = 'active-lease.json'; Present = (Test-Path -LiteralPath $campaign.paths.active_marker) }
+)) {
+    if ($check.Present) { $residualErrors.Add("$($check.Name) remains") }
+}
+if ((Get-RelatedProducts $campaign.fixed.AppUpgradeCode).Count -ne 0) { $residualErrors.Add('App UpgradeCode family is not empty') }
+if ((Get-RelatedProducts $campaign.fixed.RuntimeUpgradeCode).Count -ne 0) { $residualErrors.Add('Runtime UpgradeCode family is not empty') }
+foreach ($localPackage in @($candidateLocalPackages | Sort-Object -Unique)) {
+    if (Test-Path -LiteralPath $localPackage) { $residualErrors.Add("Candidate Windows Installer LocalPackage remains: $localPackage") }
+}
+$candidateProviderKeys = @(
+    [string]$campaign.candidate.setup.bundle_provider_key,
+    ("{0}_v{1}" -f $campaign.candidate.app_msi.product_code, $campaign.candidate.app_msi.product_version),
+    ("{0}_v{1}" -f $campaign.candidate.runtime_msi.product_code, $campaign.candidate.runtime_msi.product_version)
+)
+foreach ($providerKey in $candidateProviderKeys) {
+    if (Test-DependencyProvider $providerKey) { $residualErrors.Add("Candidate dependency provider remains: $providerKey") }
+}
+$candidateCacheDirectories = @(
+    (Join-Path $campaign.paths.package_cache_root ([string]$campaign.candidate.setup.bundle_provider_key)),
+    (Join-Path $campaign.paths.package_cache_root ("{0}v{1}" -f $campaign.candidate.app_msi.product_code, $campaign.candidate.app_msi.product_version)),
+    (Join-Path $campaign.paths.package_cache_root ("{0}v{1}" -f $campaign.candidate.runtime_msi.product_code, $campaign.candidate.runtime_msi.product_version))
+)
+foreach ($cacheDirectory in $candidateCacheDirectories) {
+    if (Test-Path -LiteralPath $cacheDirectory) { $residualErrors.Add("Candidate Package Cache directory remains: $cacheDirectory") }
+}
+if (Test-Path -LiteralPath $campaign.paths.common_start_menu_root) { $residualErrors.Add('Distraction Firewall common Start Menu folder remains') }
+foreach ($errorMessage in $residualErrors) { $cleanupErrors.Add($errorMessage) }
+if ($cleanupErrors.Count -eq 0) { Add-Step 'candidate-cleanup-and-residual-check' 'passed' 'No fixed product residuals detected.' }
+$postPendingRename = Get-PendingRenameSnapshot
+try { $verifiedBurnPendingDeletes = @(Assert-PendingRenameBaselinePlusBurn $pendingRenameBaseline $postPendingRename) }
+catch {
+    $verifiedBurnPendingDeletes = @()
+    $cleanupErrors.Add($_.Exception.Message)
+}
+$postSystemBaseline = Get-SystemBaseline
+try { Assert-SystemBaselineEquals $systemBaseline $postSystemBaseline 'Postflight' }
+catch { $cleanupErrors.Add($_.Exception.Message) }
+try { $ownedSystemPostflight = Assert-NoOwnedSystemObjects 'post-candidate' }
+catch { $cleanupErrors.Add($_.Exception.Message) }
+
+foreach ($file in Get-ChildItem -LiteralPath $stageEvidenceRoot -File -ErrorAction SilentlyContinue) {
+    $destination = Join-Path $returnedEvidenceRoot $file.Name
+    if (-not (Test-Path -LiteralPath $destination)) { Copy-Item -LiteralPath $file.FullName -Destination $destination }
+}
+Assert-PinnedEvidenceInputs
+$stageCleanupError = $null
+try {
+    Remove-VerifiedStageTree $stageRoot
+    $script:stageCreatedByCampaign = $false
+}
+catch {
+    $stageCleanupError = $_.Exception.Message
+    $cleanupErrors.Add("Protected staging teardown failed: $stageCleanupError")
+}
+$resultOutcome = if ($null -eq $campaignError -and $cleanupErrors.Count -eq 0 -and $null -ne $smokeEvidence -and [string]$smokeEvidence.outcome -ceq 'passed') { 'passed' } else { 'failed' }
+$result = [ordered]@{
+    schema = 'distraction-firewall/live-validation-result/v1'
+    campaign_id = [string]$campaign.campaign_id
+    outcome = $resultOutcome
+    completed_at_utc = [DateTime]::UtcNow.ToString('o')
+    candidate = [ordered]@{
+        version = [string]$campaign.candidate.version
+        source_commit_sha = [string]$campaign.source.commit_sha
+        workflow_run_id = [string]$campaign.source.workflow_run_id
+        workflow_run_attempt = [int]$campaign.source.workflow_run_attempt
+        artifact_id = [string]$campaign.source.artifact_id
+        artifact_digest = [string]$campaign.source.artifact_digest
+        artifact_archive_size = [int64]$campaign.input_records.artifact_archive_size
+        candidate_manifest_sha256 = [string]$campaign.input_records.candidate_manifest_sha256
+        provenance_envelope_sha256 = [string]$campaign.input_records.provenance_envelope_sha256
+        setup_sha256 = [string]$campaign.candidate.setup.sha256
+        app_product_code = [string]$campaign.candidate.app_msi.product_code
+        runtime_product_code = [string]$campaign.candidate.runtime_msi.product_code
+        bundle_provider_key = [string]$campaign.candidate.setup.bundle_provider_key
+    }
+    tooling = [ordered]@{
+        github_cli = $campaign.tooling.github_cli
+    }
+    owner_sid = [string]$campaign.owner_sid
+    uac_prompts = 1
+    lease_started = $false
+    recovery = $recoveryEvidence
+    service = $serviceEvidence
+    standard_user_smoke = $smokeEvidence
+    uninstall = $uninstallEvidence
+    steps = @($steps)
+    campaign_error = $campaignError
+    cleanup_errors = @($cleanupErrors)
+    protected_stage_teardown_error = $stageCleanupError
+    residual_errors = @($residualErrors)
+    pending_rename = [ordered]@{
+        baseline = $pendingRenameBaseline
+        postflight = $postPendingRename
+        verified_burn_pending_deletes = @($verifiedBurnPendingDeletes)
+    }
+    system_baseline = [ordered]@{
+        before = $systemBaseline
+        after = $postSystemBaseline
+        owned_objects_before = $ownedSystemPreflight
+        owned_objects_after = $ownedSystemPostflight
+    }
+}
+$resultPath = Join-Path $returnedEvidenceRoot 'campaign-result.json'
+if (-not (Test-Path -LiteralPath $resultPath)) { Write-NewJson $resultPath $result }
+
+$hashLines = @(
+    Get-ChildItem -LiteralPath $returnedEvidenceRoot -File |
+        Where-Object { $_.Name -cne 'evidence.sha256' } |
+        Sort-Object Name |
+        ForEach-Object { "$(Get-LowerSha256 $_.FullName)  $($_.Name)" }
+)
+[IO.File]::WriteAllLines((Join-Path $returnedEvidenceRoot 'evidence.sha256'), $hashLines, [Text.UTF8Encoding]::new($false))
+
+if ($resultOutcome -cne 'passed') {
+    [Console]::Error.WriteLine("Live-validation campaign failed: $campaignError; cleanup: $($cleanupErrors -join '; ')")
+    exit 1
+}
+exit 0

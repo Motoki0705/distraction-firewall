@@ -7,6 +7,17 @@ namespace DistractionFirewall.Integration.Windows.Tests;
 public sealed class WfpInteropAndPolicyTests
 {
     [Fact]
+    public void WfpExceptionPreservesNativeErrorCodeAsHResult()
+    {
+        const uint errorCode = 0x80320005;
+
+        var exception = new WfpException("test-operation", errorCode);
+
+        Assert.Equal(errorCode, exception.ErrorCode);
+        Assert.Equal(unchecked((int)errorCode), exception.HResult);
+    }
+
+    [Fact]
     public void NativeLayoutsMatchWindowsX64Abi()
     {
         Assert.Equal(8, nint.Size);
@@ -199,6 +210,23 @@ public sealed class WfpInteropAndPolicyTests
     }
 
     [Fact]
+    public void InstallationCleanupTreatsMissingInfrastructureAsIdempotentWithoutEnumeratingFilters()
+    {
+        var native = new FakeWfpNativeSessionFactory();
+        var store = new WfpPolicyStore(native);
+
+        store.RemovePersistentInfrastructure();
+
+        Assert.Equal(WfpObjectMatch.Missing, native.Provider);
+        Assert.Equal(WfpObjectMatch.Missing, native.SubLayer);
+        Assert.Empty(native.InfrastructureDeletionOrder);
+        Assert.Equal(0, native.CountFilterReferencesCount);
+        Assert.Equal(1, native.BeginCount);
+        Assert.Equal(1, native.CommitCount);
+        Assert.Equal(0, native.AbortCount);
+    }
+
+    [Fact]
     public void InstallationCleanupDeletesEmptyMatchingSublayerThenProviderInOneTransaction()
     {
         var native = new FakeWfpNativeSessionFactory
@@ -213,13 +241,36 @@ public sealed class WfpInteropAndPolicyTests
         Assert.Equal(WfpObjectMatch.Missing, native.Provider);
         Assert.Equal(WfpObjectMatch.Missing, native.SubLayer);
         Assert.Equal(["sublayer", "provider"], native.InfrastructureDeletionOrder);
+        Assert.Equal(1, native.CountFilterReferencesCount);
         Assert.Equal(1, native.BeginCount);
         Assert.Equal(1, native.CommitCount);
         Assert.Equal(0, native.AbortCount);
     }
 
+    [Theory]
+    [InlineData(false, true, "sublayer")]
+    [InlineData(true, false, "provider")]
+    public void InstallationCleanupInspectsFiltersBeforeDeletingMixedInfrastructure(
+        bool providerPresent,
+        bool subLayerPresent,
+        string expectedDeletion)
+    {
+        var native = new FakeWfpNativeSessionFactory
+        {
+            Provider = providerPresent ? WfpObjectMatch.Matching : WfpObjectMatch.Missing,
+            SubLayer = subLayerPresent ? WfpObjectMatch.Matching : WfpObjectMatch.Missing,
+        };
+
+        new WfpPolicyStore(native).RemovePersistentInfrastructure();
+
+        Assert.Equal([expectedDeletion], native.InfrastructureDeletionOrder);
+        Assert.Equal(1, native.CountFilterReferencesCount);
+        Assert.Equal(1, native.CommitCount);
+        Assert.Equal(0, native.AbortCount);
+    }
+
     [Fact]
-    public void InstallationCleanupRefusesReferencedOrForeignInfrastructureWithoutDeletion()
+    public void InstallationCleanupRefusesReferencedInfrastructureWithoutDeletion()
     {
         var referenced = new FakeWfpNativeSessionFactory
         {
@@ -227,20 +278,34 @@ public sealed class WfpInteropAndPolicyTests
             SubLayer = WfpObjectMatch.Matching,
             AdditionalProductFilterReferences = 1,
         };
-        var foreign = new FakeWfpNativeSessionFactory
-        {
-            Provider = WfpObjectMatch.Foreign,
-            SubLayer = WfpObjectMatch.Matching,
-        };
 
         Assert.Throws<InvalidOperationException>(() =>
             new WfpPolicyStore(referenced).RemovePersistentInfrastructure());
+
+        Assert.Empty(referenced.InfrastructureDeletionOrder);
+        Assert.Equal(1, referenced.CountFilterReferencesCount);
+        Assert.Equal(1, referenced.AbortCount);
+    }
+
+    [Theory]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public void InstallationCleanupRefusesForeignInfrastructureBeforeEnumeratingFilters(
+        bool providerForeign,
+        bool subLayerForeign)
+    {
+        var foreign = new FakeWfpNativeSessionFactory
+        {
+            Provider = providerForeign ? WfpObjectMatch.Foreign : WfpObjectMatch.Matching,
+            SubLayer = subLayerForeign ? WfpObjectMatch.Foreign : WfpObjectMatch.Matching,
+        };
+
         Assert.Throws<InvalidOperationException>(() =>
             new WfpPolicyStore(foreign).RemovePersistentInfrastructure());
 
-        Assert.Empty(referenced.InfrastructureDeletionOrder);
         Assert.Empty(foreign.InfrastructureDeletionOrder);
-        Assert.Equal(1, referenced.AbortCount);
+        Assert.Equal(0, foreign.CountFilterReferencesCount);
         Assert.Equal(1, foreign.AbortCount);
     }
 

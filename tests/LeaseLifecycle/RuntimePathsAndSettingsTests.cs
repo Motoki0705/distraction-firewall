@@ -165,43 +165,44 @@ public sealed class RuntimePathsAndSettingsTests
     }
 
     [Fact]
-    public async Task Never_started_install_cleanup_uses_fixed_seed_without_creating_settings()
+    public async Task Never_started_install_cleanup_uses_fixed_identity_without_creating_settings()
     {
         using var workspace = new TestWorkspace();
         var paths = CreateTestPaths(workspace);
         Directory.CreateDirectory(paths.DataRoot);
-        var seed = new FakeInstallerSeedSource(new RuntimeInstallerSeed(
-            "S-1-5-18",
-            RuntimePaths.ProductInstanceId));
 
         var productInstanceId =
             await RuntimeSettingsLoader.ResolveInstallationCleanupProductInstanceIdAsync(
                 paths,
-                seed,
                 CancellationToken.None);
 
         Assert.Equal(RuntimePaths.ProductInstanceId, productInstanceId);
-        Assert.Equal(1, seed.ReadCount);
         Assert.False(File.Exists(paths.SettingsPath));
     }
 
     [Fact]
-    public async Task Never_started_install_cleanup_rejects_foreign_seed()
+    public async Task Installation_cleanup_rejects_foreign_settings_identity()
     {
         using var workspace = new TestWorkspace();
         var paths = CreateTestPaths(workspace);
         Directory.CreateDirectory(paths.DataRoot);
-        var seed = new FakeInstallerSeedSource(new RuntimeInstallerSeed(
-            "S-1-5-18",
-            "foreign-product"));
+        await File.WriteAllTextAsync(
+            paths.SettingsPath,
+            $$"""
+            {
+              "schema_version": 1,
+              "product_instance_id": "foreign-product",
+              "owner_sids": ["{{OwnerSid}}"]
+            }
+            """,
+            CancellationToken.None);
 
         await Assert.ThrowsAsync<InvalidDataException>(() =>
             RuntimeSettingsLoader.ResolveInstallationCleanupProductInstanceIdAsync(
                 paths,
-                seed,
                 CancellationToken.None));
 
-        Assert.False(File.Exists(paths.SettingsPath));
+        Assert.True(File.Exists(paths.SettingsPath));
     }
 
     [Fact]
@@ -210,17 +211,11 @@ public sealed class RuntimePathsAndSettingsTests
         using var workspace = new TestWorkspace();
         var paths = CreateTestPaths(workspace);
         Directory.CreateDirectory(paths.SettingsPath);
-        var seed = new FakeInstallerSeedSource(new RuntimeInstallerSeed(
-            "S-1-5-18",
-            RuntimePaths.ProductInstanceId));
 
         await Assert.ThrowsAsync<InvalidDataException>(() =>
             RuntimeSettingsLoader.ResolveInstallationCleanupProductInstanceIdAsync(
                 paths,
-                seed,
                 CancellationToken.None));
-
-        Assert.Equal(0, seed.ReadCount);
     }
 
     [Theory]

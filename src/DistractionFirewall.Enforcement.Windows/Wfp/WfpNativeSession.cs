@@ -488,6 +488,7 @@ internal sealed class WfpException : InvalidOperationException
         : base($"{operation} failed with WFP error 0x{errorCode:X8}.")
     {
         ErrorCode = errorCode;
+        HResult = unchecked((int)errorCode);
     }
 
     public uint ErrorCode { get; }

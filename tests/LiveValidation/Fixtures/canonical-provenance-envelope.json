@@ -1,0 +1,12 @@
+{
+  "schema": "distraction-firewall/live-validation-provenance/v1",
+  "repository": "Motoki0705/distraction-firewall",
+  "sourceCommitSha": "1111111111111111111111111111111111111111",
+  "workflowRunId": 123456,
+  "workflowRunAttempt": 1,
+  "artifactId": "987654",
+  "artifactName": "release-candidate-0.1.0-alpha.2-1111111111111111111111111111111111111111-123456-1",
+  "artifactDigest": "sha256:8888888888888888888888888888888888888888888888888888888888888888",
+  "artifactArchiveSizeBytes": 900,
+  "candidateManifestSha256": "9999999999999999999999999999999999999999999999999999999999999999"
+}

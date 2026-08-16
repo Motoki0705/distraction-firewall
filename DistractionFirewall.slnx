@@ -28,6 +28,9 @@
   <Folder Name="/tests/LeaseLifecycle/">
     <Project Path="tests/LeaseLifecycle/DistractionFirewall.LeaseLifecycleTests.csproj" />
   </Folder>
+  <Folder Name="/tests/LiveValidation/">
+    <Project Path="tests/LiveValidation/DistractionFirewall.LiveValidation.Tests.csproj" />
+  </Folder>
   <Folder Name="/tests/UI/">
     <Project Path="tests/UI/DistractionFirewall.UiTests.csproj" />
   </Folder>

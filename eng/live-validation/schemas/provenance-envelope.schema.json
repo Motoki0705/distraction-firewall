@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Motoki0705/distraction-firewall/blob/main/eng/live-validation/schemas/provenance-envelope.schema.json",
+  "title": "Distraction Firewall live-validation provenance envelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "repository", "sourceCommitSha", "workflowRunId", "workflowRunAttempt", "artifactId", "artifactName", "artifactDigest", "artifactArchiveSizeBytes", "candidateManifestSha256"],
+  "properties": {
+    "schema": { "const": "distraction-firewall/live-validation-provenance/v1" },
+    "repository": { "const": "Motoki0705/distraction-firewall" },
+    "sourceCommitSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "workflowRunId": { "type": "integer", "minimum": 1 },
+    "workflowRunAttempt": { "type": "integer", "minimum": 1 },
+    "artifactId": { "type": "string", "pattern": "^[1-9][0-9]*$" },
+    "artifactName": { "type": "string", "pattern": "^release-candidate-[0-9A-Za-z.-]+-[0-9a-f]{40}-[1-9][0-9]*-[1-9][0-9]*$" },
+    "artifactDigest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "artifactArchiveSizeBytes": { "type": "integer", "minimum": 1 },
+    "candidateManifestSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  }
+}
