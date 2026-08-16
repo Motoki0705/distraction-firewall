@@ -46,6 +46,34 @@ function Assert-Condition {
     if (-not $Condition) { throw $Message }
 }
 
+function Import-TrustedSystemNetHttpAssembly {
+    $systemNetHttpAssemblyIdentity = 'System.Net.Http, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a'
+    $trustedSystemNetHttpPath = [IO.Path]::Combine(
+        $nativeWindowsDirectory,
+        'Microsoft.Net',
+        'assembly',
+        'GAC_MSIL',
+        'System.Net.Http',
+        'v4.0_4.0.0.0__b03f5f7f11d50a3a',
+        'System.Net.Http.dll')
+
+    Assert-Condition ([IO.File]::Exists($trustedSystemNetHttpPath)) 'Trusted System.Net.Http assembly is missing from the native Windows GAC.'
+    Assert-Condition (([IO.File]::GetAttributes($trustedSystemNetHttpPath) -band [IO.FileAttributes]::ReparsePoint) -eq 0) 'Trusted System.Net.Http assembly is a reparse point.'
+    try {
+        $systemNetHttpAssembly = [Reflection.Assembly]::Load($systemNetHttpAssemblyIdentity)
+    }
+    catch {
+        throw "Trusted System.Net.Http assembly could not be loaded: $($_.Exception.Message)"
+    }
+
+    Assert-Condition ($systemNetHttpAssembly.FullName -ceq $systemNetHttpAssemblyIdentity) 'Loaded System.Net.Http assembly identity is not the fixed Microsoft strong name.'
+    Assert-Condition $systemNetHttpAssembly.GlobalAssemblyCache 'Loaded System.Net.Http assembly did not come from the native Windows GAC.'
+    $loadedSystemNetHttpPath = [IO.Path]::GetFullPath($systemNetHttpAssembly.Location)
+    Assert-Condition ($loadedSystemNetHttpPath.Equals($trustedSystemNetHttpPath, [StringComparison]::OrdinalIgnoreCase)) 'Loaded System.Net.Http assembly path is not the fixed native Windows GAC path.'
+}
+
+$null = Import-TrustedSystemNetHttpAssembly
+
 function Get-LowerSha256 {
     param([Parameter(Mandatory)][string]$Path)
     return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
