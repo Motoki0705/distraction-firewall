@@ -1,0 +1,870 @@
+#requires -Version 5.1
+
+[CmdletBinding()]
+param(
+    [switch]$VerifyOnly
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+$windowsDirectory = [IO.Path]::GetFullPath([Environment]::GetFolderPath([Environment+SpecialFolder]::Windows)).TrimEnd('\')
+$systemDirectory = [IO.Path]::GetFullPath([Environment]::GetFolderPath([Environment+SpecialFolder]::System)).TrimEnd('\')
+$trustedPowerShellRoot = [IO.Path]::GetFullPath([IO.Path]::Combine($systemDirectory, 'WindowsPowerShell')).TrimEnd('\')
+$trustedPowerShellHome = [IO.Path]::GetFullPath([IO.Path]::Combine($trustedPowerShellRoot, 'v1.0')).TrimEnd('\')
+if (-not ([IO.Path]::GetFullPath($PSHOME).TrimEnd('\').Equals($trustedPowerShellHome, [StringComparison]::OrdinalIgnoreCase))) {
+    throw 'Campaign parent is not running from the native Windows PowerShell 5.1 system directory.'
+}
+$trustedPowerShellModuleRoot = [IO.Path]::Combine($trustedPowerShellHome, 'Modules')
+$env:PATH = "$systemDirectory;$windowsDirectory;$trustedPowerShellHome"
+$env:PSModulePath = $trustedPowerShellModuleRoot
+$env:PATHEXT = '.COM;.EXE;.BAT;.CMD'
+$env:PSExecutionPolicyPreference = 'Bypass'
+$env:SystemRoot = $windowsDirectory
+$env:windir = $windowsDirectory
+$env:ComSpec = [IO.Path]::Combine($systemDirectory, 'cmd.exe')
+foreach ($moduleName in @('Microsoft.PowerShell.Management', 'Microsoft.PowerShell.Utility', 'Microsoft.PowerShell.Security', 'DnsClient')) {
+    $moduleManifest = [IO.Path]::Combine($trustedPowerShellModuleRoot, $moduleName, "$moduleName.psd1")
+    Microsoft.PowerShell.Core\Import-Module -Name $moduleManifest -Force -ErrorAction Stop
+}
+$PSModuleAutoLoadingPreference = 'None'
+
+if ($null -eq ('DistractionFirewall.LiveValidation.MandatoryIntegrityInspection' -as [type])) {
+    Microsoft.PowerShell.Utility\Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+
+namespace DistractionFirewall.LiveValidation
+{
+    public static class MandatoryIntegrityInspection
+    {
+        private const uint SeFileObject = 1;
+        private const uint LabelSecurityInformation = 0x00000010;
+
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
+        private static extern uint GetNamedSecurityInfoW(
+            string objectName,
+            uint objectType,
+            uint securityInformation,
+            IntPtr owner,
+            IntPtr group,
+            IntPtr dacl,
+            out IntPtr sacl,
+            out IntPtr securityDescriptor);
+
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, ExactSpelling = true, SetLastError = true)]
+        private static extern bool ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            IntPtr securityDescriptor,
+            uint requestedRevision,
+            uint securityInformation,
+            out IntPtr stringSecurityDescriptor,
+            out uint stringSecurityDescriptorLength);
+
+        [DllImport("kernel32.dll", ExactSpelling = true)]
+        private static extern IntPtr LocalFree(IntPtr memory);
+
+        public static string GetLabelSddl(string path)
+        {
+            IntPtr sacl;
+            IntPtr securityDescriptor;
+            uint result = GetNamedSecurityInfoW(
+                path,
+                SeFileObject,
+                LabelSecurityInformation,
+                IntPtr.Zero,
+                IntPtr.Zero,
+                IntPtr.Zero,
+                out sacl,
+                out securityDescriptor);
+            if (result != 0)
+            {
+                throw new Win32Exception((int)result);
+            }
+
+            try
+            {
+                IntPtr text;
+                uint textLength;
+                if (!ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                    securityDescriptor,
+                    1,
+                    LabelSecurityInformation,
+                    out text,
+                    out textLength))
+                {
+                    throw new Win32Exception(Marshal.GetLastWin32Error());
+                }
+
+                try
+                {
+                    return Marshal.PtrToStringUni(text) ?? string.Empty;
+                }
+                finally
+                {
+                    LocalFree(text);
+                }
+            }
+            finally
+            {
+                LocalFree(securityDescriptor);
+            }
+        }
+    }
+}
+'@
+}
+
+$campaignBase64 = '__CAMPAIGN_BASE64__'
+$expectedElevatedRunnerSha256 = '__ELEVATED_RUNNER_SHA256__'
+$campaignJson = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($campaignBase64))
+$campaign = $campaignJson | ConvertFrom-Json
+$stateRoot = Join-Path $PSScriptRoot 'state'
+$evidenceRoot = Join-Path $PSScriptRoot 'evidence'
+$elevatedRunner = Join-Path $PSScriptRoot 'Invoke-ElevatedPhase.ps1'
+$windowsPowerShell = [IO.Path]::Combine($trustedPowerShellHome, 'powershell.exe')
+
+function Assert-Condition {
+    param(
+        [Parameter(Mandatory)][bool]$Condition,
+        [Parameter(Mandatory)][string]$Message
+    )
+    if (-not $Condition) { throw $Message }
+}
+
+function Assert-AcceptableMandatoryIntegritySddl {
+    param(
+        [AllowEmptyString()][Parameter(Mandatory)][string]$Sddl,
+        [Parameter(Mandatory)][string]$Description
+    )
+
+    # LABEL_SECURITY_INFORMATION returns an empty string when no explicit label
+    # exists. Windows then applies the effective Medium object integrity level.
+    if ([string]::IsNullOrEmpty($Sddl)) { return }
+    try { $descriptor = [Security.AccessControl.RawSecurityDescriptor]::new($Sddl) }
+    catch { throw "$Description mandatory integrity label could not be parsed." }
+    $mandatoryAces = @()
+    if ($null -ne $descriptor.SystemAcl) {
+        for ($index = 0; $index -lt $descriptor.SystemAcl.Count; $index++) {
+            $ace = $descriptor.SystemAcl[$index]
+            if ([int]$ace.AceType -eq 17) { $mandatoryAces += $ace }
+        }
+    }
+    if ($mandatoryAces.Count -eq 0) { return }
+    Assert-Condition ($mandatoryAces.Count -eq 1) "$Description has a conflicting mandatory integrity label set."
+    $binary = New-Object byte[] $mandatoryAces[0].BinaryLength
+    $mandatoryAces[0].GetBinaryForm($binary, 0)
+    Assert-Condition ($binary.Length -ge 20) "$Description mandatory integrity label is malformed."
+    $policyMask = [BitConverter]::ToUInt32($binary, 4)
+    Assert-Condition ($policyMask -in @([uint32]1, [uint32]3, [uint32]5, [uint32]7)) "$Description mandatory integrity policy is unknown or permits write-up."
+    try { $labelSid = [Security.Principal.SecurityIdentifier]::new($binary, 8) }
+    catch { throw "$Description mandatory integrity SID could not be parsed." }
+    Assert-Condition ($binary.Length -eq (8 + $labelSid.BinaryLength)) "$Description mandatory integrity label has trailing data."
+    Assert-Condition ($labelSid.Value -in @('S-1-16-8192', 'S-1-16-12288', 'S-1-16-16384')) "$Description has an untrusted, low, or unknown mandatory integrity level: $($labelSid.Value)"
+}
+
+function Test-DangerousLoaderEnvironmentName {
+    param([Parameter(Mandatory)][string]$Name)
+    $upperName = $Name.ToUpperInvariant()
+    if ($upperName.StartsWith('COR_', [StringComparison]::Ordinal) -or
+        $upperName.StartsWith('CORECLR_', [StringComparison]::Ordinal) -or
+        $upperName.StartsWith('COMPLUS_', [StringComparison]::Ordinal) -or
+        $upperName.StartsWith('APPDOMAIN_MANAGER_', [StringComparison]::Ordinal)) {
+        return $true
+    }
+    return $upperName -ceq 'DOTNET_ENABLE_PROFILING' -or
+        $upperName -ceq 'DOTNET_PROFILER' -or
+        $upperName.StartsWith('DOTNET_PROFILER_', [StringComparison]::Ordinal) -or
+        $upperName -ceq 'DOTNET_STARTUP_HOOKS' -or
+        $upperName -ceq 'DOTNET_ADDITIONAL_DEPS' -or
+        $upperName -ceq 'DOTNET_SHARED_STORE' -or
+        $upperName -ceq 'DOTNET_ROOT' -or
+        $upperName.StartsWith('DOTNET_ROOT_', [StringComparison]::Ordinal)
+}
+
+function Get-DangerousLoaderEnvironmentFindings {
+    param([Collections.IDictionary]$EnvironmentByScope)
+    if ($null -eq $EnvironmentByScope) {
+        $EnvironmentByScope = [ordered]@{}
+        foreach ($scope in @('Process', 'User', 'Machine')) {
+            $EnvironmentByScope[$scope] = [Environment]::GetEnvironmentVariables($scope)
+        }
+    }
+    $findings = @()
+    foreach ($scope in @($EnvironmentByScope.Keys)) {
+        foreach ($entry in $EnvironmentByScope[$scope].GetEnumerator()) {
+            $name = [string]$entry.Key
+            if ((Test-DangerousLoaderEnvironmentName $name) -and -not [string]::IsNullOrEmpty([string]$entry.Value)) {
+                # Never copy values into evidence or errors: profiler/startup-hook
+                # variables can themselves contain sensitive user paths.
+                $findings += [ordered]@{ scope = [string]$scope; name = $name }
+            }
+        }
+    }
+    return @($findings)
+}
+
+function Assert-PrivilegedPathAcl {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Description
+    )
+    $acl = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Path
+    Assert-AcceptableMandatoryIntegritySddl ([DistractionFirewall.LiveValidation.MandatoryIntegrityInspection]::GetLabelSddl([IO.Path]::GetFullPath($Path))) $Description
+    $trustedInstaller = 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
+    $trustedWriterSids = @('S-1-5-18', 'S-1-5-32-544', $trustedInstaller)
+    $ownerSid = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+    Assert-Condition ($ownerSid -in $trustedWriterSids) "$Description owner is not SYSTEM, Administrators, or TrustedInstaller: $ownerSid"
+    $dangerousRightsMask = [int64]0x500D0156
+    $descriptor = [Security.AccessControl.RawSecurityDescriptor]::new($acl.GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::All))
+    for ($index = 0; $index -lt $descriptor.DiscretionaryAcl.Count; $index++) {
+        $ace = $descriptor.DiscretionaryAcl[$index]
+        if ($ace -isnot [Security.AccessControl.QualifiedAce] -or $ace.AceQualifier -ne [Security.AccessControl.AceQualifier]::AccessAllowed) { continue }
+        if (([int]$ace.AceFlags -band [int][Security.AccessControl.AceFlags]::InheritOnly) -ne 0) { continue }
+        $rawRights = [int64][int32]$ace.AccessMask
+        if ($rawRights -lt 0) { $rawRights += 4294967296 }
+        if (($rawRights -band $dangerousRightsMask) -ne 0) {
+            $sid = $ace.SecurityIdentifier.Value
+            Assert-Condition ($sid -in $trustedWriterSids) "$Description grants dangerous write/delete/ACL rights to non-privileged SID $sid."
+        }
+    }
+}
+
+function Assert-TrustedSystemBinary {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Description
+    )
+    $fullPath = [IO.Path]::GetFullPath($Path)
+    Assert-Condition ($fullPath.StartsWith($windowsDirectory + '\', [StringComparison]::OrdinalIgnoreCase)) "$Description escaped the native Windows directory."
+    foreach ($trustedPath in @($windowsDirectory, $systemDirectory, $trustedPowerShellRoot, $trustedPowerShellHome, $trustedPowerShellModuleRoot, $fullPath) | Select-Object -Unique) {
+        Assert-Condition (Test-Path -LiteralPath $trustedPath) "$Description trusted path is missing: $trustedPath"
+        $item = Microsoft.PowerShell.Management\Get-Item -LiteralPath $trustedPath -Force
+        Assert-Condition (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) "$Description trusted path is a reparse point: $trustedPath"
+        Assert-PrivilegedPathAcl $trustedPath "$Description trusted path"
+    }
+    Assert-Condition (Test-Path -LiteralPath $fullPath -PathType Leaf) "$Description is missing: $fullPath"
+    $signature = Microsoft.PowerShell.Security\Get-AuthenticodeSignature -LiteralPath $fullPath
+    $microsoftWindowsSubject = 'CN=Microsoft Windows, O=Microsoft Corporation, L=Redmond, S=Washington, C=US'
+    Assert-Condition ($signature.Status.ToString() -ceq 'Valid' -and $null -ne $signature.SignerCertificate) "$Description Authenticode signature is invalid."
+    Assert-Condition ([string]$signature.SignerCertificate.Subject -ceq $microsoftWindowsSubject) "$Description publisher is not Microsoft Windows."
+}
+
+function Invoke-WithSanitizedElevationEnvironment {
+    param(
+        [Parameter(Mandatory)][scriptblock]$Operation,
+        [Collections.IDictionary]$EnvironmentByScope
+    )
+    $lastMomentFindings = @(Get-DangerousLoaderEnvironmentFindings $EnvironmentByScope)
+    Assert-Condition ($lastMomentFindings.Count -eq 0) ("Managed-runtime loader environment changed before elevation: {0}" -f (($lastMomentFindings | ForEach-Object { "$($_.scope):$($_.name)" }) -join ', '))
+
+    $processEnvironment = [Environment]::GetEnvironmentVariables('Process')
+    $environmentNames = @('PATH', 'PSModulePath', 'PATHEXT', 'PSExecutionPolicyPreference', 'SystemRoot', 'windir', 'ComSpec')
+    foreach ($entry in $processEnvironment.GetEnumerator()) {
+        if (Test-DangerousLoaderEnvironmentName ([string]$entry.Key)) { $environmentNames += [string]$entry.Key }
+    }
+    $environmentNames = @($environmentNames | Sort-Object -Unique)
+    $savedEnvironment = [ordered]@{}
+    foreach ($name in $environmentNames) {
+        $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+    }
+
+    try {
+        foreach ($name in $environmentNames) {
+            if (Test-DangerousLoaderEnvironmentName $name) {
+                [Environment]::SetEnvironmentVariable($name, $null, 'Process')
+            }
+        }
+        $env:PATH = "$systemDirectory;$windowsDirectory;$trustedPowerShellHome"
+        $env:PSModulePath = $trustedPowerShellModuleRoot
+        $env:PATHEXT = '.COM;.EXE;.BAT;.CMD'
+        $env:PSExecutionPolicyPreference = 'Bypass'
+        $env:SystemRoot = $windowsDirectory
+        $env:windir = $windowsDirectory
+        $env:ComSpec = [IO.Path]::Combine($systemDirectory, 'cmd.exe')
+        return & $Operation
+    }
+    finally {
+        foreach ($name in $environmentNames) {
+            [Environment]::SetEnvironmentVariable($name, $savedEnvironment[$name], 'Process')
+        }
+    }
+}
+
+function Start-TrustedElevatedPowerShell {
+    param(
+        [Parameter(Mandatory)][string]$EncodedBootstrap,
+        [Parameter(Mandatory)][string]$ExecutablePath
+    )
+    return Invoke-WithSanitizedElevationEnvironment -Operation {
+        Microsoft.PowerShell.Management\Start-Process -FilePath $ExecutablePath -ArgumentList @(
+            '-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
+            '-EncodedCommand', $EncodedBootstrap
+        ) -Verb RunAs -PassThru -WindowStyle Hidden -WorkingDirectory $systemDirectory
+    }
+}
+
+function Get-LowerSha256 {
+    param([Parameter(Mandatory)][string]$Path)
+    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+
+function Assert-LeafFingerprint {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][int64]$Size,
+        [Parameter(Mandatory)][string]$Sha256,
+        [string]$AuthenticodeStatus,
+        [Parameter(Mandatory)][string]$Description
+    )
+    Assert-Condition (Test-Path -LiteralPath $Path -PathType Leaf) "$Description is missing: $Path"
+    $item = Get-Item -LiteralPath $Path -Force
+    Assert-Condition (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) "$Description is a reparse point: $Path"
+    Assert-Condition ($item.Length -eq $Size) "$Description size changed: $Path"
+    Assert-Condition ((Get-LowerSha256 $Path) -ceq $Sha256) "$Description hash changed: $Path"
+    if (-not [string]::IsNullOrEmpty($AuthenticodeStatus)) {
+        $status = (Get-AuthenticodeSignature -LiteralPath $Path).Status.ToString()
+        Assert-Condition ($status -ceq $AuthenticodeStatus) "$Description Authenticode status changed: $Path"
+    }
+}
+
+function Copy-PinnedEvidenceInput {
+    param(
+        [Parameter(Mandatory)][string]$Source,
+        [Parameter(Mandatory)][string]$EvidenceName,
+        [Parameter(Mandatory)][int64]$Size,
+        [Parameter(Mandatory)][string]$Sha256
+    )
+    Assert-Condition ([IO.Path]::GetFileName($EvidenceName) -ceq $EvidenceName) 'Evidence input name must be a fixed leaf.'
+    Assert-LeafFingerprint $Source $Size $Sha256 '' "evidence input $EvidenceName"
+    $destination = Join-Path $evidenceRoot $EvidenceName
+    Copy-Item -LiteralPath $Source -Destination $destination
+    Assert-LeafFingerprint $destination $Size $Sha256 '' "copied evidence input $EvidenceName"
+}
+
+function Write-NewJson {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)]$Value
+    )
+    $json = $Value | ConvertTo-Json -Depth 20
+    $encoding = [Text.UTF8Encoding]::new($false)
+    $stream = [IO.File]::Open($Path, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+    try {
+        $writer = [IO.StreamWriter]::new($stream, $encoding)
+        try { $writer.WriteLine($json) } finally { $writer.Dispose() }
+    }
+    finally { $stream.Dispose() }
+}
+
+function Read-PhaseRecord {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$ExpectedPhase
+    )
+    $record = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+    Assert-Condition ([string]$record.schema -ceq 'distraction-firewall/live-validation-phase/v1') 'Phase record schema mismatch.'
+    Assert-Condition ([string]$record.campaign_id -ceq [string]$campaign.campaign_id) 'Phase record campaign mismatch.'
+    Assert-Condition ([string]$record.phase_nonce -ceq [string]$campaign.phase_nonce) 'Phase record nonce mismatch.'
+    Assert-Condition ([string]$record.phase -ceq $ExpectedPhase) 'Phase record type mismatch.'
+    return $record
+}
+
+function Get-BlockingRebootReasons {
+    $reasons = [Collections.Generic.List[string]]::new()
+    foreach ($key in @(
+        'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending',
+        'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired',
+        'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\InProgress'
+    )) {
+        if (Test-Path -LiteralPath $key) { $reasons.Add($key) }
+    }
+    $volatile = Get-ItemPropertyValue -LiteralPath 'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Updates' -Name UpdateExeVolatile -ErrorAction SilentlyContinue
+    if ($null -ne $volatile -and [int64]$volatile -ne 0) { $reasons.Add("UpdateExeVolatile=$volatile") }
+    $computerNameRoot = 'Registry::HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\ComputerName'
+    $active = Get-ItemPropertyValue -LiteralPath "$computerNameRoot\ActiveComputerName" -Name ComputerName -ErrorAction SilentlyContinue
+    $configured = Get-ItemPropertyValue -LiteralPath "$computerNameRoot\ComputerName" -Name ComputerName -ErrorAction SilentlyContinue
+    if ($null -eq $active -or $null -eq $configured -or -not ([string]$active).Equals([string]$configured, [StringComparison]::OrdinalIgnoreCase)) {
+        $reasons.Add('pending-computer-rename')
+    }
+    return @($reasons)
+}
+
+function Get-PendingRenameSnapshot {
+    $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry64)
+    try {
+        $key = $base.OpenSubKey('SYSTEM\CurrentControlSet\Control\Session Manager', $false)
+        Assert-Condition ($null -ne $key) 'Session Manager registry key is missing.'
+        try {
+            $values = [ordered]@{}
+            foreach ($name in @('PendingFileRenameOperations', 'PendingFileRenameOperations2')) {
+                $names = @($key.GetValueNames())
+                if ($names -cnotcontains $name) {
+                    $values[$name] = [ordered]@{ present = $false; kind = $null; pairs = @() }
+                    continue
+                }
+                $kind = $key.GetValueKind($name).ToString()
+                Assert-Condition ($kind -ceq 'MultiString') "$name must be REG_MULTI_SZ."
+                [string[]]$raw = @($key.GetValue($name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames))
+                Assert-Condition (($raw.Count % 2) -eq 0) "$name has an incomplete source/destination pair."
+                $pairs = @()
+                for ($index = 0; $index -lt $raw.Count; $index += 2) {
+                    Assert-Condition (-not [string]::IsNullOrEmpty($raw[$index])) "$name contains an empty source."
+                    $pairs += [ordered]@{ source = $raw[$index]; destination = $raw[$index + 1] }
+                }
+                $values[$name] = [ordered]@{ present = $true; kind = $kind; pairs = @($pairs) }
+            }
+            return [pscustomobject][ordered]@{
+                schema = 'distraction-firewall/pending-rename-snapshot/v1'
+                values = [pscustomobject]$values
+            }
+        }
+        finally { $key.Dispose() }
+    }
+    finally { $base.Dispose() }
+}
+
+function Convert-RegistryValueForEvidence {
+    param(
+        [Parameter(Mandatory)]$Value,
+        [Parameter(Mandatory)][string]$Kind
+    )
+    switch ($Kind) {
+        'Binary' { return [Convert]::ToBase64String([byte[]]$Value) }
+        'MultiString' { return @([string[]]$Value) }
+        'DWord' { return ([uint32]$Value).ToString([Globalization.CultureInfo]::InvariantCulture) }
+        'QWord' { return ([uint64]$Value).ToString([Globalization.CultureInfo]::InvariantCulture) }
+        default { return [string]$Value }
+    }
+}
+
+function Get-BrowserPolicySnapshot {
+    $paths = @(
+        'SOFTWARE\Policies\Google\Chrome',
+        'SOFTWARE\Policies\Google\Chrome\URLBlocklist',
+        'SOFTWARE\Policies\Google\Chrome\URLAllowlist',
+        'SOFTWARE\Policies\Microsoft\Edge',
+        'SOFTWARE\Policies\Microsoft\Edge\URLBlocklist',
+        'SOFTWARE\Policies\Microsoft\Edge\URLAllowlist',
+        'SOFTWARE\Policies\Mozilla\Firefox\WebsiteFilter\Block',
+        'SOFTWARE\Policies\Mozilla\Firefox\WebsiteFilter\Exceptions',
+        'SOFTWARE\Policies\Mozilla\Firefox\DNSOverHTTPS'
+    )
+    $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, [Microsoft.Win32.RegistryView]::Registry64)
+    try {
+        $records = @()
+        foreach ($path in $paths) {
+            $key = $base.OpenSubKey($path, $false)
+            if ($null -eq $key) {
+                $records += [ordered]@{ path = $path; exists = $false; values = @() }
+                continue
+            }
+            try {
+                $values = @()
+                foreach ($name in @($key.GetValueNames() | Sort-Object)) {
+                    $kind = $key.GetValueKind($name).ToString()
+                    $raw = $key.GetValue($name, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                    $values += [ordered]@{ name = [string]$name; kind = $kind; value = Convert-RegistryValueForEvidence $raw $kind }
+                }
+                $records += [ordered]@{ path = $path; exists = $true; values = @($values) }
+            }
+            finally { $key.Dispose() }
+        }
+        return @($records)
+    }
+    finally { $base.Dispose() }
+}
+
+function Get-DnsClientSnapshot {
+    $records = @(
+        DnsClient\Get-DnsClientServerAddress -ErrorAction Stop | Sort-Object InterfaceIndex, AddressFamily | ForEach-Object {
+            [ordered]@{
+                interface_index = [uint32]$_.InterfaceIndex
+                interface_alias = [string]$_.InterfaceAlias
+                address_family = [string]$_.AddressFamily
+                server_addresses = @([string[]]$_.ServerAddresses)
+            }
+        }
+    )
+    return @($records)
+}
+
+function Get-SystemBaseline {
+    return [pscustomobject][ordered]@{
+        schema = 'distraction-firewall/system-baseline/v1'
+        dns_client_server_addresses = @(Get-DnsClientSnapshot)
+        browser_machine_policy = @(Get-BrowserPolicySnapshot)
+    }
+}
+
+function Wait-ForPhase {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$ExpectedPhase,
+        [Parameter(Mandatory)][Diagnostics.Process]$ElevatedProcess,
+        [Parameter(Mandatory)][int]$TimeoutSeconds
+    )
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    while ([DateTime]::UtcNow -lt $deadline) {
+        if (Test-Path -LiteralPath $Path -PathType Leaf) {
+            return Read-PhaseRecord -Path $Path -ExpectedPhase $ExpectedPhase
+        }
+        if ($ElevatedProcess.HasExited) {
+            throw "Elevated phase exited before '$ExpectedPhase' (exit $($ElevatedProcess.ExitCode))."
+        }
+        Start-Sleep -Milliseconds 250
+    }
+    throw "Timed out waiting for elevated phase '$ExpectedPhase'."
+}
+
+function Invoke-FixedCli {
+    param(
+        [Parameter(Mandatory)][ValidateSet('targets', 'status', 'diagnose')][string]$Command,
+        [Parameter(Mandatory)][string]$OutputBaseName
+    )
+    Assert-Condition (-not (Test-Path -LiteralPath $campaign.paths.active_marker)) 'active-lease.json appeared; refusing all client smoke.'
+    Assert-Condition (Test-Path -LiteralPath $campaign.paths.cli -PathType Leaf) 'Installed CLI is missing.'
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = [string]$campaign.paths.cli
+    $startInfo.Arguments = "$Command --json"
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    Assert-Condition $process.Start() "CLI '$Command' did not start."
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    $stderrTask = $process.StandardError.ReadToEndAsync()
+    if (-not $process.WaitForExit(30000)) {
+        $process.Kill()
+        throw "CLI '$Command' timed out."
+    }
+    $stdout = $stdoutTask.GetAwaiter().GetResult()
+    $stderr = $stderrTask.GetAwaiter().GetResult()
+    [IO.File]::WriteAllText((Join-Path $evidenceRoot "$OutputBaseName.stdout.json"), $stdout, [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText((Join-Path $evidenceRoot "$OutputBaseName.stderr.txt"), $stderr, [Text.UTF8Encoding]::new($false))
+    Assert-Condition ($process.ExitCode -eq 0) "CLI '$Command' failed with exit $($process.ExitCode)."
+    Assert-Condition (-not [string]::IsNullOrWhiteSpace($stdout)) "CLI '$Command' returned no JSON."
+    return $stdout | ConvertFrom-Json
+}
+
+function Invoke-UiSmoke {
+    Assert-Condition (-not (Test-Path -LiteralPath $campaign.paths.active_marker)) 'active-lease.json appeared; refusing UI smoke.'
+    Assert-Condition (Test-Path -LiteralPath $campaign.paths.app -PathType Leaf) 'Installed UI is missing.'
+    Add-Type -AssemblyName UIAutomationClient
+    Add-Type -AssemblyName UIAutomationTypes
+    $decodeLabel = {
+        param([Parameter(Mandatory)][string]$Base64)
+        return [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($Base64))
+    }
+    $requiredControlNames = @(
+        'YouTube',
+        (& $decodeLabel '5pyf6ZaT44KS5oyH5a6a'),
+        (& $decodeLabel '5oyH5a6a5pmC5Yi744G+44Gn'),
+        (& $decodeLabel '5Lu75oSP44Gu5YiG5pWw'),
+        (& $decodeLabel '56K66KqN44G4')
+    )
+    $presetName = & $decodeLabel '5pyf6ZaT44OX44Oq44K744OD44OI'
+    $expectedDurations = @(
+        'MTXliIY=', 'MzDliIY=', 'MeaZgumWkw==', 'MuaZgumWkw==',
+        'NOaZgumWkw==', 'OOaZgumWkw==', 'MTLmmYLplpM=', '5Lu75oSP44Gu5YiG5pWw'
+    ) | ForEach-Object { & $decodeLabel $_ }
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = [string]$campaign.paths.app
+    $startInfo.UseShellExecute = $false
+    $process = [Diagnostics.Process]::Start($startInfo)
+    Assert-Condition ($null -ne $process) 'UI did not start.'
+    $snapshot = $null
+    try {
+        $deadline = [DateTime]::UtcNow.AddSeconds(30)
+        while ([DateTime]::UtcNow -lt $deadline) {
+            if ($process.HasExited) { throw "UI exited before its main window was ready (exit $($process.ExitCode))." }
+            $process.Refresh()
+            if ($process.MainWindowHandle -ne [IntPtr]::Zero -and $process.MainWindowTitle -ceq 'Distraction Firewall') {
+                $root = [Windows.Automation.AutomationElement]::FromHandle($process.MainWindowHandle)
+                if ($null -ne $root) {
+                    $elements = $root.FindAll(
+                        [Windows.Automation.TreeScope]::Descendants,
+                        [Windows.Automation.Condition]::TrueCondition)
+                    $buttons = $elements | Where-Object {
+                            $_.Current.ControlType -eq [Windows.Automation.ControlType]::Button
+                        }
+                    if (@($buttons).Count -gt 0) {
+                        $names = @($elements | ForEach-Object { [string]$_.Current.Name } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Sort-Object -Unique)
+                        foreach ($requiredName in $requiredControlNames) {
+                            Assert-Condition ($names -ccontains $requiredName) "UI Automation did not expose required control '$requiredName'."
+                        }
+                        $presetCombo = @($elements | Where-Object {
+                            $_.Current.ControlType -eq [Windows.Automation.ControlType]::ComboBox -and $_.Current.Name -ceq $presetName
+                        })
+                        Assert-Condition ($presetCombo.Count -eq 1) 'UI Automation did not expose the unique duration preset ComboBox.'
+                        $expandPattern = $presetCombo[0].GetCurrentPattern([Windows.Automation.ExpandCollapsePattern]::Pattern)
+                        $durationNames = @()
+                        try {
+                            $expandPattern.Expand()
+                            Start-Sleep -Milliseconds 300
+                            $desktopElements = [Windows.Automation.AutomationElement]::RootElement.FindAll(
+                                [Windows.Automation.TreeScope]::Descendants,
+                                [Windows.Automation.Condition]::TrueCondition)
+                            $durationNames = @($desktopElements | Where-Object {
+                                $_.Current.ProcessId -eq $process.Id -and $_.Current.ControlType -eq [Windows.Automation.ControlType]::ListItem
+                            } | ForEach-Object { [string]$_.Current.Name } | Sort-Object -Unique)
+                        }
+                        finally { $expandPattern.Collapse() }
+                        foreach ($duration in $expectedDurations) {
+                            Assert-Condition ($durationNames -ccontains $duration) "UI Automation did not expose duration '$duration'."
+                        }
+                        $snapshot = [ordered]@{
+                            process_id = $process.Id
+                            main_window_title = $process.MainWindowTitle
+                            automation_name = $root.Current.Name
+                            button_count = @($buttons).Count
+                            required_control_names = $requiredControlNames
+                            duration_choices = $expectedDurations
+                            owner_sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+                            elevated = $false
+                            lease_controls_invoked = $false
+                        }
+                        break
+                    }
+                }
+            }
+            Start-Sleep -Milliseconds 250
+        }
+        Assert-Condition ($null -ne $snapshot) 'UI Automation did not observe the reviewed main window and controls.'
+    }
+    finally {
+        if (-not $process.HasExited) {
+            $null = $process.CloseMainWindow()
+            if (-not $process.WaitForExit(5000)) {
+                $process.Kill()
+                $null = $process.WaitForExit(5000)
+            }
+        }
+    }
+    Assert-Condition (-not (Test-Path -LiteralPath $campaign.paths.active_marker)) 'UI smoke created active-lease.json; validation is aborted.'
+    return [pscustomobject]$snapshot
+}
+
+Assert-Condition ([string]$campaign.schema -ceq 'distraction-firewall/live-validation-campaign/v1') 'Embedded campaign schema is unsupported.'
+Assert-Condition ([IO.Path]::GetFullPath($PSScriptRoot).Equals([IO.Path]::GetFullPath([string]$campaign.output_root), [StringComparison]::OrdinalIgnoreCase)) 'Campaign was moved after generation.'
+Assert-Condition ($PSVersionTable.PSEdition -ceq 'Desktop' -and $PSVersionTable.PSVersion.Major -eq 5) 'Use Windows PowerShell 5.1 for the campaign parent.'
+Assert-Condition ([Environment]::Is64BitOperatingSystem -and [Environment]::Is64BitProcess) 'Campaign requires native x64 PowerShell.'
+$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+$principal = [Security.Principal.WindowsPrincipal]::new($identity)
+Assert-Condition (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) 'Campaign parent must remain non-elevated.'
+Assert-Condition ($identity.User.Value -ceq [string]$campaign.owner_sid) 'Campaign owner SID differs from the current standard token.'
+Assert-Condition (Test-Path -LiteralPath $windowsPowerShell -PathType Leaf) 'Windows PowerShell 5.1 executable is missing.'
+$currentPowerShellPath = [IO.Path]::GetFullPath([Diagnostics.Process]::GetCurrentProcess().MainModule.FileName)
+Assert-Condition ($currentPowerShellPath.Equals($windowsPowerShell, [StringComparison]::OrdinalIgnoreCase)) 'Campaign parent was not launched by the fixed native Windows PowerShell executable.'
+Assert-TrustedSystemBinary $windowsPowerShell 'native Windows PowerShell 5.1'
+Assert-Condition (Test-Path -LiteralPath $elevatedRunner -PathType Leaf) 'Elevated campaign runner is missing.'
+Assert-Condition ((Get-LowerSha256 $elevatedRunner) -ceq $expectedElevatedRunnerSha256) 'Elevated campaign runner changed after preparation.'
+$loaderEnvironmentFindings = @(Get-DangerousLoaderEnvironmentFindings)
+Assert-Condition ($loaderEnvironmentFindings.Count -eq 0) ("Managed-runtime loader environment is unsafe: {0}" -f (($loaderEnvironmentFindings | ForEach-Object { "$($_.scope):$($_.name)" }) -join ', '))
+$executionEnvironmentSnapshot = [ordered]@{
+    schema = 'distraction-firewall/live-validation-execution-environment/v1'
+    scopes_checked = @('Process', 'User', 'Machine')
+    dangerous_loader_variable_count = 0
+    values_recorded = $false
+    native_windows_directory = $windowsDirectory
+    native_system_directory = $systemDirectory
+    native_powershell = $windowsPowerShell
+    trusted_module_root = $trustedPowerShellModuleRoot
+    normalized_path = "$systemDirectory;$windowsDirectory;$trustedPowerShellHome"
+    normalized_pathext = '.COM;.EXE;.BAT;.CMD'
+}
+
+Assert-LeafFingerprint $campaign.input_records.candidate_manifest_path ([int64]$campaign.input_records.candidate_manifest_size) $campaign.input_records.candidate_manifest_sha256 '' 'candidate manifest'
+Assert-LeafFingerprint $campaign.input_records.provenance_envelope_path ([int64]$campaign.input_records.provenance_envelope_size) $campaign.input_records.provenance_envelope_sha256 '' 'provenance envelope'
+Assert-LeafFingerprint $campaign.input_records.artifact_archive_path ([int64]$campaign.input_records.artifact_archive_size) $campaign.input_records.artifact_archive_sha256 '' 'raw artifact archive'
+foreach ($artifact in @($campaign.candidate.setup, $campaign.candidate.app_msi, $campaign.candidate.runtime_msi)) {
+    Assert-LeafFingerprint $artifact.path ([int64]$artifact.size) $artifact.sha256 $artifact.authenticode_status 'candidate binary'
+}
+foreach ($artifact in @($campaign.candidate.sbom, $campaign.candidate.checksums)) {
+    Assert-LeafFingerprint $artifact.path ([int64]$artifact.size) $artifact.sha256 '' 'candidate metadata'
+}
+foreach ($artifact in @($campaign.candidate.hosted_evidence, $campaign.candidate.subjects, $campaign.candidate.attestation_bundle)) {
+    Assert-LeafFingerprint $artifact.path ([int64]$artifact.size) $artifact.sha256 '' 'candidate provenance payload'
+}
+if ($null -ne $campaign.recovery) {
+    Assert-LeafFingerprint $campaign.recovery.manifest_path ([int64]$campaign.recovery.manifest_size) $campaign.recovery.manifest_sha256 '' 'recovery manifest'
+    Assert-LeafFingerprint $campaign.recovery.msi_path ([int64]$campaign.recovery.manifest.runtimeMsi.size) $campaign.recovery.manifest.runtimeMsi.sha256 $campaign.recovery.manifest.runtimeMsi.authenticodeStatus 'recovery MSI'
+}
+Assert-Condition (-not (Test-Path -LiteralPath $campaign.paths.active_marker)) 'An active lease exists. Wait for expiry; validation never starts or modifies a lease.'
+$blockingReboots = @(Get-BlockingRebootReasons)
+Assert-Condition ($blockingReboots.Count -eq 0) "A blocking pending reboot exists: $($blockingReboots -join '; ')"
+$pendingRenameBaseline = Get-PendingRenameSnapshot
+$systemBaseline = Get-SystemBaseline
+
+if ($VerifyOnly) {
+    [pscustomobject][ordered]@{
+        schema = 'distraction-firewall/live-validation-verification/v1'
+        campaign_id = [string]$campaign.campaign_id
+        owner_sid = $identity.User.Value
+        elevated = $false
+        candidate_version = [string]$campaign.candidate.version
+        source_commit_sha = [string]$campaign.source.commit_sha
+        elevated_runner_sha256 = $expectedElevatedRunnerSha256
+        execution_environment = $executionEnvironmentSnapshot
+        verified = $true
+        mutation_performed = $false
+    } | ConvertTo-Json -Depth 8
+    exit 0
+}
+
+Assert-Condition (@(Get-ChildItem -LiteralPath $stateRoot -Force).Count -eq 0) 'Campaign state is not empty; campaigns cannot be resumed or replayed.'
+Assert-Condition (@(Get-ChildItem -LiteralPath $evidenceRoot -Force).Count -eq 0) 'Campaign evidence is not empty; use a newly generated campaign.'
+Copy-PinnedEvidenceInput $campaign.input_records.candidate_manifest_path 'candidate-manifest.json' ([int64]$campaign.input_records.candidate_manifest_size) $campaign.input_records.candidate_manifest_sha256
+Copy-PinnedEvidenceInput $campaign.input_records.provenance_envelope_path 'provenance-envelope.json' ([int64]$campaign.input_records.provenance_envelope_size) $campaign.input_records.provenance_envelope_sha256
+Copy-PinnedEvidenceInput $campaign.candidate.hosted_evidence.path 'hosted-evidence.json' ([int64]$campaign.candidate.hosted_evidence.size) $campaign.candidate.hosted_evidence.sha256
+Copy-PinnedEvidenceInput $campaign.candidate.subjects.path 'candidate-subjects.sha256' ([int64]$campaign.candidate.subjects.size) $campaign.candidate.subjects.sha256
+Copy-PinnedEvidenceInput $campaign.candidate.attestation_bundle.path 'provenance.bundle.json' ([int64]$campaign.candidate.attestation_bundle.size) $campaign.candidate.attestation_bundle.sha256
+if ($null -ne $campaign.recovery) {
+    Copy-PinnedEvidenceInput $campaign.recovery.manifest_path 'runtime-recovery-manifest.json' ([int64]$campaign.recovery.manifest_size) $campaign.recovery.manifest_sha256
+}
+Write-NewJson (Join-Path $evidenceRoot 'execution-environment.json') $executionEnvironmentSnapshot
+$parentStarted = [ordered]@{
+    schema = 'distraction-firewall/live-validation-phase/v1'
+    campaign_id = [string]$campaign.campaign_id
+    phase_nonce = [string]$campaign.phase_nonce
+    phase = 'parent-started'
+    recorded_at_utc = [DateTime]::UtcNow.ToString('o')
+    owner_sid = $identity.User.Value
+    elevated = $false
+}
+Write-NewJson (Join-Path $stateRoot 'parent-started.json') $parentStarted
+Write-NewJson (Join-Path $stateRoot 'pending-rename-baseline.json') $pendingRenameBaseline
+Write-NewJson (Join-Path $stateRoot 'system-baseline.json') $systemBaseline
+
+$elevatedProcess = $null
+$smokeMarkerWritten = $false
+try {
+    # This is the campaign's only elevation boundary. The short bootstrap pins
+    # the absolute child path and digest. After consent it opens the source with
+    # FileShare.None, hashes those exact bytes, and executes those same bytes in
+    # memory. UAC wait time therefore cannot become a hash-to-load race.
+    $bootstrapTemplate = @'
+$ErrorActionPreference = 'Stop'
+$windowsDirectory = [IO.Path]::GetFullPath([Environment]::GetFolderPath([Environment+SpecialFolder]::Windows)).TrimEnd('\')
+$systemDirectory = [IO.Path]::GetFullPath([Environment]::GetFolderPath([Environment+SpecialFolder]::System)).TrimEnd('\')
+$trustedPowerShellRoot = [IO.Path]::GetFullPath([IO.Path]::Combine($systemDirectory, 'WindowsPowerShell')).TrimEnd('\')
+$trustedPowerShellHome = [IO.Path]::GetFullPath([IO.Path]::Combine($trustedPowerShellRoot, 'v1.0')).TrimEnd('\')
+if (-not ([IO.Path]::GetFullPath($PSHOME).TrimEnd('\').Equals($trustedPowerShellHome, [StringComparison]::OrdinalIgnoreCase))) {
+    throw 'Elevated bootstrap is not running from native Windows PowerShell 5.1.'
+}
+$trustedPowerShellModuleRoot = [IO.Path]::Combine($trustedPowerShellHome, 'Modules')
+$env:PATH = "$systemDirectory;$windowsDirectory;$trustedPowerShellHome"
+$env:PSModulePath = $trustedPowerShellModuleRoot
+$env:PATHEXT = '.COM;.EXE;.BAT;.CMD'
+$env:PSExecutionPolicyPreference = 'Bypass'
+$env:SystemRoot = $windowsDirectory
+$env:windir = $windowsDirectory
+$env:ComSpec = [IO.Path]::Combine($systemDirectory, 'cmd.exe')
+foreach ($moduleName in @('Microsoft.PowerShell.Management', 'Microsoft.PowerShell.Utility', 'Microsoft.PowerShell.Security')) {
+    $moduleManifest = [IO.Path]::Combine($trustedPowerShellModuleRoot, $moduleName, "$moduleName.psd1")
+    Microsoft.PowerShell.Core\Import-Module -Name $moduleManifest -Force -ErrorAction Stop
+}
+$PSModuleAutoLoadingPreference = 'None'
+$runnerPath = '__RUNNER_PATH__'
+$expectedSha256 = '__RUNNER_SHA256__'
+$stream = [IO.File]::Open($runnerPath, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
+try {
+    $memory = [IO.MemoryStream]::new()
+    try {
+        $stream.CopyTo($memory)
+        [byte[]]$bytes = $memory.ToArray()
+    }
+    finally { $memory.Dispose() }
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try { $actual = ([BitConverter]::ToString($algorithm.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant() }
+    finally { $algorithm.Dispose() }
+    if ($actual -cne $expectedSha256) { throw 'Elevated runner hash mismatch after UAC consent.' }
+    $utf8 = [Text.UTF8Encoding]::new($false, $true)
+    $text = $utf8.GetString($bytes)
+    if ($text.IndexOf([char]0) -ge 0) { throw 'Elevated runner contains a NUL character.' }
+    $scriptBlock = [ScriptBlock]::Create($text)
+    & $scriptBlock
+    if ($null -ne $LASTEXITCODE) { exit $LASTEXITCODE }
+    exit 0
+}
+finally { $stream.Dispose() }
+'@
+    $bootstrap = $bootstrapTemplate.
+        Replace('__RUNNER_PATH__', $elevatedRunner.Replace("'", "''")).
+        Replace('__RUNNER_SHA256__', $expectedElevatedRunnerSha256)
+    $encodedBootstrap = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($bootstrap))
+    Assert-Condition ($encodedBootstrap.Length -lt 24000) 'Pinned elevated bootstrap exceeds the reviewed command-line limit.'
+    $elevatedProcess = Start-TrustedElevatedPowerShell -EncodedBootstrap $encodedBootstrap -ExecutablePath $windowsPowerShell
+
+    $readyPath = Join-Path $stateRoot 'awaiting-standard-user-smoke.json'
+    $ready = Wait-ForPhase -Path $readyPath -ExpectedPhase 'awaiting-standard-user-smoke' -ElevatedProcess $elevatedProcess -TimeoutSeconds 1200
+    Assert-Condition ([string]$ready.outcome -ceq 'ready') 'Elevated installation phase did not become ready.'
+    Assert-Condition (-not (Test-Path -LiteralPath $campaign.paths.active_marker)) 'An active lease exists after install; refusing client smoke.'
+
+    $targets = Invoke-FixedCli -Command targets -OutputBaseName 'cli-targets'
+    $status = Invoke-FixedCli -Command status -OutputBaseName 'cli-status'
+    $diagnostics = Invoke-FixedCli -Command diagnose -OutputBaseName 'cli-diagnose'
+    Assert-Condition (@($targets.targets).Count -eq 1) 'Target catalog must contain exactly the YouTube MVP target.'
+    Assert-Condition ([string]$targets.targets[0].stable_id -ceq 'youtube') 'Target catalog does not contain the fixed YouTube target.'
+    Assert-Condition ([string]$status.state -ceq 'idle' -and $null -eq $status.lease_id) 'Status is not idle/no-lease.'
+    Assert-Condition (@($diagnostics.checks).Count -gt 0 -and @($diagnostics.checks | Where-Object { -not $_.is_healthy }).Count -eq 0) 'Runtime diagnostics are not healthy.'
+    $ui = Invoke-UiSmoke
+    Assert-Condition (-not (Test-Path -LiteralPath $campaign.paths.active_marker)) 'Client smoke created an active lease.'
+
+    $smoke = [ordered]@{
+        schema = 'distraction-firewall/live-validation-phase/v1'
+        campaign_id = [string]$campaign.campaign_id
+        phase_nonce = [string]$campaign.phase_nonce
+        phase = 'standard-user-smoke-complete'
+        outcome = 'passed'
+        recorded_at_utc = [DateTime]::UtcNow.ToString('o')
+        owner_sid = $identity.User.Value
+        elevated = $false
+        commands = @('targets --json', 'status --json', 'diagnose --json')
+        ui = $ui
+        lease_start_invoked = $false
+    }
+    Write-NewJson (Join-Path $stateRoot 'standard-user-smoke-complete.json') $smoke
+    Write-NewJson (Join-Path $evidenceRoot 'standard-user-smoke.json') $smoke
+    $smokeMarkerWritten = $true
+}
+catch {
+    $failure = [ordered]@{
+        schema = 'distraction-firewall/live-validation-phase/v1'
+        campaign_id = [string]$campaign.campaign_id
+        phase_nonce = [string]$campaign.phase_nonce
+        phase = 'standard-user-smoke-complete'
+        outcome = 'failed'
+        recorded_at_utc = [DateTime]::UtcNow.ToString('o')
+        owner_sid = $identity.User.Value
+        elevated = $false
+        error = $_.Exception.Message
+        lease_start_invoked = $false
+    }
+    if ($null -ne $elevatedProcess -and -not $smokeMarkerWritten -and -not (Test-Path -LiteralPath (Join-Path $stateRoot 'standard-user-smoke-complete.json'))) {
+        Write-NewJson (Join-Path $stateRoot 'standard-user-smoke-complete.json') $failure
+        $smokeMarkerWritten = $true
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $evidenceRoot 'standard-user-smoke.json'))) {
+        Write-NewJson (Join-Path $evidenceRoot 'standard-user-smoke.json') $failure
+    }
+    throw
+}
+finally {
+    if ($null -ne $elevatedProcess -and -not $elevatedProcess.HasExited) {
+        $null = $elevatedProcess.WaitForExit(1200000)
+    }
+}
+
+Assert-Condition ($elevatedProcess.HasExited) 'Elevated campaign did not finish cleanup within the fixed timeout.'
+Assert-Condition ($elevatedProcess.ExitCode -eq 0) "Elevated campaign failed with exit $($elevatedProcess.ExitCode)."
+$finalPath = Join-Path $evidenceRoot 'campaign-result.json'
+Assert-Condition (Test-Path -LiteralPath $finalPath -PathType Leaf) 'Elevated campaign did not return final evidence.'
+$final = Get-Content -LiteralPath $finalPath -Raw | ConvertFrom-Json
+Assert-Condition ([string]$final.schema -ceq 'distraction-firewall/live-validation-result/v1') 'Final evidence schema mismatch.'
+Assert-Condition ([string]$final.campaign_id -ceq [string]$campaign.campaign_id) 'Final evidence campaign mismatch.'
+Assert-Condition ([string]$final.outcome -ceq 'passed') 'Live-validation campaign did not pass.'
+Assert-Condition (-not (Test-Path -LiteralPath $campaign.paths.active_marker)) 'active-lease.json exists after campaign.'
+Write-Host "Live-validation campaign passed. Evidence: $evidenceRoot"

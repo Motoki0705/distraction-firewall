@@ -226,6 +226,8 @@ internal sealed class FakeWfpNativeSessionFactory : IWfpNativeSessionFactory
 
     public int DeleteSubLayerCount { get; set; }
 
+    public int CountFilterReferencesCount { get; set; }
+
     public List<string> InfrastructureDeletionOrder { get; } = [];
 
     public IWfpNativeSession Open()
@@ -310,8 +312,11 @@ internal sealed class FakeWfpNativeSessionFactory : IWfpNativeSessionFactory
             _owner.SubLayer = WfpObjectMatch.Missing;
         }
 
-        public int CountFiltersReferencingProductObjects() =>
-            checked(_owner.Filters.Count + _owner.AdditionalProductFilterReferences);
+        public int CountFiltersReferencingProductObjects()
+        {
+            _owner.CountFilterReferencesCount++;
+            return checked(_owner.Filters.Count + _owner.AdditionalProductFilterReferences);
+        }
 
         public WfpObjectMatch InspectFilter(WfpFilterSpec spec)
         {

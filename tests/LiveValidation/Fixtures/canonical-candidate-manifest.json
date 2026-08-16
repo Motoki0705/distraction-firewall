@@ -1,0 +1,68 @@
+{
+  "schema": "distraction-firewall/build-once-candidate/v1",
+  "version": "0.1.0-alpha.2",
+  "source": {
+    "repository": "Motoki0705/distraction-firewall",
+    "commitSha": "1111111111111111111111111111111111111111",
+    "ref": "refs/heads/main",
+    "workflowPath": ".github/workflows/release-candidate.yml",
+    "workflowRef": "Motoki0705/distraction-firewall/.github/workflows/release-candidate.yml@refs/heads/main",
+    "workflowRunId": 123456,
+    "workflowRunAttempt": 1,
+    "artifactId": null,
+    "artifactDigestSha256": null
+  },
+  "artifacts": {
+    "setupExe": {
+      "fileName": "distraction-firewall-setup-0.1.0-alpha.2-win-x64.exe",
+      "sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "sizeBytes": 100,
+      "authenticodeStatus": "NotSigned",
+      "bundleProviderKey": "{AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA}",
+      "bundleUpgradeCode": "{9F89BB92-BF79-4127-A4F5-4A4A4FD88EE6}",
+      "burnEngine": {
+        "sizeBytes": 20,
+        "sha256": "3333333333333333333333333333333333333333333333333333333333333333"
+      }
+    },
+    "appMsi": {
+      "fileName": "distraction-firewall-app-0.1.0-alpha.2-win-x64.msi",
+      "sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+      "sizeBytes": 200,
+      "authenticodeStatus": "NotSigned",
+      "productCode": "{BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB}",
+      "packageCode": "{CCCCCCCC-CCCC-CCCC-CCCC-CCCCCCCCCCCC}",
+      "upgradeCode": "{F6467493-5819-4046-900A-C9FDF87DF7C1}",
+      "productVersion": "0.1.0"
+    },
+    "runtimeMsi": {
+      "fileName": "distraction-firewall-runtime-0.1.0-alpha.2-win-x64.msi",
+      "sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+      "sizeBytes": 300,
+      "authenticodeStatus": "NotSigned",
+      "productCode": "{DDDDDDDD-DDDD-DDDD-DDDD-DDDDDDDDDDDD}",
+      "packageCode": "{EEEEEEEE-EEEE-EEEE-EEEE-EEEEEEEEEEEE}",
+      "upgradeCode": "{275EC377-2EB2-487F-AD4B-BA0BA85C2FFB}",
+      "productVersion": "0.1.0"
+    },
+    "checksum": {
+      "fileName": "distraction-firewall-0.1.0-alpha.2.sha256",
+      "sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+      "sizeBytes": 400
+    },
+    "sbom": {
+      "fileName": "distraction-firewall-0.1.0-alpha.2.spdx.json",
+      "sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+      "sizeBytes": 500
+    }
+  },
+  "signing": {
+    "configured": false,
+    "outerPackageStatuses": {
+      "setupExe": "NotSigned",
+      "appMsi": "NotSigned",
+      "runtimeMsi": "NotSigned"
+    },
+    "disclosure": "Unsigned prerelease fixture."
+  }
+}

@@ -1,61 +1,49 @@
-name: Release
+name: Release promotion
 
 on:
   push:
     tags:
       - 'v*'
-  workflow_dispatch:
-    inputs:
-      release_tag:
-        description: Existing draft Release tag to smoke-test (for example v0.1.0-alpha.1)
-        required: true
-        type: string
-      release_commit:
-        description: Exact 40-character commit SHA referenced by release_tag and reachable from protected main
-        required: true
-        type: string
-      run_windows11_smoke:
-        description: Run destructive install/service/uninstall checks on the isolated self-hosted Windows 11 runner
-        required: true
-        default: false
-        type: boolean
-      confirm_isolated_test_machine:
-        description: Type ISOLATED-WINDOWS-11-RUNNER when the runner is disposable and contains no user installation
-        required: false
-        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-promotion-${{ github.ref }}
   cancel-in-progress: false
 
-env:
-  DOTNET_CLI_TELEMETRY_OPTOUT: '1'
-  DOTNET_NOLOGO: '1'
-  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: '1'
-
 jobs:
-  live-smoke-approval:
-    name: Release / Windows 11 live-smoke approval
-    if: ${{ github.event_name == 'push' }}
+  promotion-approval:
+    name: Release / exact candidate and smoke approval
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
     environment: windows-11-live-smoke-approval
     permissions:
+      actions: read
       contents: read
     outputs:
-      approved_sha: ${{ steps.approval.outputs.approved_sha }}
-      approved_tag: ${{ steps.approval.outputs.approved_tag }}
+      approval_run_attempt: ${{ steps.gate.outputs.approval_run_attempt }}
+      artifact_digest: ${{ steps.gate.outputs.artifact_digest }}
+      artifact_id: ${{ steps.gate.outputs.artifact_id }}
+      artifact_name: ${{ steps.gate.outputs.artifact_name }}
+      candidate_run_attempt: ${{ steps.gate.outputs.candidate_run_attempt }}
+      candidate_run_id: ${{ steps.gate.outputs.candidate_run_id }}
+      evidence_sha256: ${{ steps.gate.outputs.evidence_sha256 }}
+      manifest_sha256: ${{ steps.gate.outputs.manifest_sha256 }}
+      release_sha: ${{ steps.gate.outputs.release_sha }}
+      release_tag: ${{ steps.gate.outputs.release_tag }}
+      version: ${{ steps.gate.outputs.version }}
     steps:
-      - name: Validate exact commit and tag approval against protected main
-        id: approval
-        shell: pwsh
+      - name: Validate protected main, tag, candidate run, artifact, and smoke attestation
+        id: gate
+        shell: bash
         env:
-          API_URL: ${{ github.api_url }}
           APPROVED_SHA: ${{ vars.WINDOWS_11_LIVE_SMOKE_APPROVED_SHA }}
           APPROVED_TAG: ${{ vars.WINDOWS_11_LIVE_SMOKE_APPROVED_TAG }}
+          CANDIDATE_ARTIFACT_DIGEST: ${{ vars.RELEASE_CANDIDATE_ARTIFACT_DIGEST }}
+          CANDIDATE_ARTIFACT_ID: ${{ vars.RELEASE_CANDIDATE_ARTIFACT_ID }}
+          CANDIDATE_MANIFEST_SHA256: ${{ vars.RELEASE_CANDIDATE_MANIFEST_SHA256 }}
+          CANDIDATE_RUN_ID: ${{ vars.RELEASE_CANDIDATE_RUN_ID }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           GH_TOKEN: ${{ github.token }}
           RELEASE_REF: ${{ github.ref }}
@@ -63,862 +51,385 @@ jobs:
           RELEASE_SHA: ${{ github.sha }}
           RELEASE_TAG: ${{ github.ref_name }}
           REPOSITORY: ${{ github.repository }}
-        run: |
-          Set-StrictMode -Version Latest
-          $ErrorActionPreference = 'Stop'
-
-          $strictTagPattern = '^v(?<version>(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:0|[1-9]\d*|[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|[A-Za-z-][0-9A-Za-z-]*))*)?)$'
-          if ($env:RELEASE_REF_TYPE -cne 'tag' -or
-              $env:RELEASE_REF -cne "refs/tags/$($env:RELEASE_TAG)" -or
-              $env:RELEASE_TAG -cnotmatch $strictTagPattern) {
-            throw 'The release event is not an exact v-prefixed SemVer tag push.'
-          }
-          if ($env:RELEASE_SHA -cnotmatch '^[0-9a-f]{40}$') {
-            throw 'The release SHA is not an exact lowercase 40-character commit SHA.'
-          }
-          if ($env:APPROVED_SHA -cnotmatch '^[0-9a-f]{40}$') {
-            throw 'WINDOWS_11_LIVE_SMOKE_APPROVED_SHA is missing or is not an exact lowercase 40-character commit SHA.'
-          }
-          if ($env:APPROVED_TAG -cnotmatch $strictTagPattern) {
-            throw 'WINDOWS_11_LIVE_SMOKE_APPROVED_TAG is missing or is not a strict v-prefixed SemVer tag.'
-          }
-          if ($env:APPROVED_SHA -cne $env:RELEASE_SHA -or
-              $env:APPROVED_TAG -cne $env:RELEASE_TAG) {
-            throw 'The Windows 11 live-smoke approval does not exactly match this release commit and tag.'
-          }
-          if ($env:DEFAULT_BRANCH -cne 'main') {
-            throw 'The repository default branch is not the expected protected main branch.'
-          }
-
-          $headers = @{
-            Accept = 'application/vnd.github+json'
-            Authorization = "Bearer $env:GH_TOKEN"
-            'X-GitHub-Api-Version' = '2022-11-28'
-          }
-          $uri = "$($env:API_URL.TrimEnd('/'))/repos/$env:REPOSITORY/branches/main"
-          try {
-            $branch = Invoke-RestMethod -Method Get -Uri $uri -Headers $headers -ErrorAction Stop
-          }
-          catch {
-            throw 'GitHub API validation of the protected main branch failed.'
-          }
-
-          $mainSha = [string]$branch.commit.sha
-          if ([string]$branch.name -cne 'main' -or -not [bool]$branch.protected) {
-            throw 'GitHub API did not return the expected protected main branch.'
-          }
-          if ($mainSha -cnotmatch '^[0-9a-f]{40}$' -or $mainSha -cne $env:RELEASE_SHA) {
-            throw 'The release commit is not the exact current protected main commit.'
-          }
-
-          "approved_sha=$($env:RELEASE_SHA)" >> $env:GITHUB_OUTPUT
-          "approved_tag=$($env:RELEASE_TAG)" >> $env:GITHUB_OUTPUT
-
-  test:
-    name: Release / test
-    if: ${{ github.event_name == 'push' }}
-    needs: live-smoke-approval
-    runs-on: windows-2025
-    timeout-minutes: 30
-    outputs:
-      version: ${{ steps.metadata.outputs.version }}
-      is_prerelease: ${{ steps.metadata.outputs.is_prerelease }}
-      tag: ${{ steps.metadata.outputs.tag }}
-    defaults:
-      run:
-        shell: pwsh
-    steps:
-      - name: Validate release tag
-        id: metadata
-        env:
-          RELEASE_TAG: ${{ github.ref_name }}
-        run: |
-          $match = [regex]::Match(
-            $env:RELEASE_TAG,
-            '^v(?<version>(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:0|[1-9]\d*|[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|[A-Za-z-][0-9A-Za-z-]*))*)?)$'
-          )
-          if (-not $match.Success) {
-            throw "Release tags must be v-prefixed SemVer without build metadata: $env:RELEASE_TAG"
-          }
-          $version = $match.Groups['version'].Value
-          $isPrerelease = $version.Contains('-').ToString().ToLowerInvariant()
-          "version=$version" >> $env:GITHUB_OUTPUT
-          "is_prerelease=$isPrerelease" >> $env:GITHUB_OUTPUT
-          "tag=$env:RELEASE_TAG" >> $env:GITHUB_OUTPUT
-
-      - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Set up .NET SDK
-        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
-        with:
-          dotnet-version: 10.0.302
-
-      - name: Restore locked dependencies
-        run: ./eng/restore.ps1
-
-      - name: Verify formatting
-        run: ./eng/format.ps1
-
-      - name: Build
-        run: ./eng/build.ps1 -Configuration Release
-
-      - name: Test
-        run: ./eng/test.ps1 -Configuration Release -ResultsDirectory '${{ runner.temp }}\distraction-firewall-release-test-results'
-
-      - name: Upload test results
-        if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: release-test-results-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}\distraction-firewall-release-test-results\*.trx
-          if-no-files-found: warn
-          retention-days: 14
-
-  publish:
-    name: Release / publish win-x64
-    if: ${{ github.event_name == 'push' }}
-    needs: test
-    runs-on: windows-2025
-    timeout-minutes: 35
-    defaults:
-      run:
-        shell: pwsh
-    steps:
-      - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Set up .NET SDK
-        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
-        with:
-          dotnet-version: 10.0.302
-
-      - name: Publish application and runtime payloads
-        env:
-          PACKAGE_VERSION: ${{ needs.test.outputs.version }}
-        run: |
-          $publishItems = @(
-            [pscustomobject]@{ Project = 'DistractionFirewall.App'; SelfContained = $true },
-            [pscustomobject]@{ Project = 'DistractionFirewall.Cli'; SelfContained = $true },
-            [pscustomobject]@{ Project = 'DistractionFirewall.ActivationService'; SelfContained = $true },
-            [pscustomobject]@{ Project = 'DistractionFirewall.LeaseWorker'; SelfContained = $true },
-            [pscustomobject]@{ Project = 'DistractionFirewall.DnsFilter'; SelfContained = $true },
-            [pscustomobject]@{ Project = 'DistractionFirewall.Finalizer'; SelfContained = $true },
-            [pscustomobject]@{ Project = 'DistractionFirewall.Enforcement.Windows'; SelfContained = $false }
-          )
-
-          foreach ($item in $publishItems) {
-            $projectPath = "src/$($item.Project)/$($item.Project).csproj"
-            $outputPath = "artifacts/publish/$($item.Project)/win-x64"
-            $selfContained = $item.SelfContained.ToString().ToLowerInvariant()
-
-            dotnet restore $projectPath --locked-mode --runtime win-x64 --nologo
-            if ($LASTEXITCODE -ne 0) {
-              throw "Locked restore failed for $($item.Project)."
-            }
-
-            dotnet publish $projectPath `
-              --configuration Release `
-              --runtime win-x64 `
-              --self-contained $selfContained `
-              --no-restore `
-              --nologo `
-              --output $outputPath `
-              -p:Version=$env:PACKAGE_VERSION `
-              -p:ContinuousIntegrationBuild=true `
-              -p:DebugType=None `
-              -p:DebugSymbols=false
-            if ($LASTEXITCODE -ne 0) {
-              throw "Publish failed for $($item.Project)."
-            }
-          }
-
-      - name: Upload publish inputs
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: publish-${{ github.run_id }}-${{ github.run_attempt }}
-          path: artifacts/publish
-          if-no-files-found: error
-          retention-days: 3
-
-  package:
-    name: Release / package
-    if: ${{ github.event_name == 'push' }}
-    needs:
-      - test
-      - publish
-    runs-on: windows-2025
-    timeout-minutes: 30
-    defaults:
-      run:
-        shell: pwsh
-    steps:
-      - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Set up .NET SDK
-        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
-        with:
-          dotnet-version: 10.0.302
-
-      - name: Download publish inputs
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: publish-${{ github.run_id }}-${{ github.run_attempt }}
-          path: artifacts/publish
-
-      - name: Provision signing certificate
-        id: signing_certificate
-        if: ${{ vars.WINDOWS_SIGNING_CONFIGURED == 'true' }}
-        env:
-          SIGNING_PFX_BASE64: ${{ secrets.WINDOWS_SIGNING_PFX_BASE64 }}
-          SIGNING_PFX_PASSWORD: ${{ secrets.WINDOWS_SIGNING_PFX_PASSWORD }}
-        run: |
-          if ([string]::IsNullOrWhiteSpace($env:SIGNING_PFX_BASE64) -or
-              [string]::IsNullOrWhiteSpace($env:SIGNING_PFX_PASSWORD)) {
-            throw 'Signing is enabled, but WINDOWS_SIGNING_PFX_BASE64 or WINDOWS_SIGNING_PFX_PASSWORD is absent.'
-          }
-
-          $pfxPath = Join-Path $env:RUNNER_TEMP 'distraction-firewall-signing.pfx'
-          try {
-            [System.IO.File]::WriteAllBytes(
-              $pfxPath,
-              [Convert]::FromBase64String($env:SIGNING_PFX_BASE64)
-            )
-            $password = ConvertTo-SecureString $env:SIGNING_PFX_PASSWORD -AsPlainText -Force
-            $imported = @(
-              Import-PfxCertificate `
-                -FilePath $pfxPath `
-                -CertStoreLocation Cert:\CurrentUser\My `
-                -Password $password `
-                -Exportable:$false
-            )
-            $signingCertificate = $imported |
-              Where-Object HasPrivateKey |
-              Sort-Object NotAfter -Descending |
-              Select-Object -First 1
-            if ($null -eq $signingCertificate) {
-              throw 'The PFX did not import a certificate with a private key.'
-            }
-            "thumbprint=$($signingCertificate.Thumbprint)" >> $env:GITHUB_OUTPUT
-          }
-          finally {
-            if (Test-Path -LiteralPath $pfxPath -PathType Leaf) {
-              Remove-Item -LiteralPath $pfxPath -Force
-            }
-          }
-
-      - name: Build and verify installers
-        env:
-          PACKAGE_VERSION: ${{ needs.test.outputs.version }}
-          SIGNING_CONFIGURED: ${{ vars.WINDOWS_SIGNING_CONFIGURED }}
-          DF_SIGNING_CERTIFICATE_THUMBPRINT: ${{ steps.signing_certificate.outputs.thumbprint }}
-          DF_SIGNING_TIMESTAMP_URL: ${{ vars.WINDOWS_SIGNING_TIMESTAMP_URL }}
-        run: |
-          $packageArguments = @{
-            Version = $env:PACKAGE_VERSION
-          }
-          if ($env:SIGNING_CONFIGURED -eq 'true') {
-            $packageArguments.SigningConfigured = $true
-          }
-          ./eng/package.ps1 @packageArguments
-
-      - name: Remove signing certificate
-        if: ${{ always() && vars.WINDOWS_SIGNING_CONFIGURED == 'true' }}
-        env:
-          SIGNING_CERTIFICATE_THUMBPRINT: ${{ steps.signing_certificate.outputs.thumbprint }}
-        run: |
-          if ($env:SIGNING_CERTIFICATE_THUMBPRINT -match '^[0-9A-Fa-f]{40}$') {
-            $certificatePath = "Cert:\CurrentUser\My\$env:SIGNING_CERTIFICATE_THUMBPRINT"
-            if (Test-Path -LiteralPath $certificatePath) {
-              Remove-Item -LiteralPath $certificatePath -Force
-            }
-          }
-
-      - name: Upload installers
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: installers-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            artifacts/package/*.msi
-            artifacts/package/*.exe
-          if-no-files-found: error
-          retention-days: 3
-
-  installer-validation:
-    name: Release / hosted installer contract
-    if: ${{ github.event_name == 'push' }}
-    needs:
-      - test
-      - package
-    runs-on: windows-2025
-    timeout-minutes: 20
-    defaults:
-      run:
-        shell: pwsh
-    steps:
-      - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Set up .NET SDK
-        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
-        with:
-          dotnet-version: 10.0.302
-
-      - name: Restore pinned WiX verification CLI
-        run: dotnet restore installer/Bundle/DistractionFirewall.Bundle.wixproj --locked-mode --nologo
-
-      - name: Download installers
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: installers-${{ github.run_id }}-${{ github.run_attempt }}
-          path: artifacts/package
-
-      - name: Verify MSI tables, administrative images, and Burn attached payloads
-        env:
-          PACKAGE_VERSION: ${{ needs.test.outputs.version }}
-          IS_PRERELEASE: ${{ needs.test.outputs.is_prerelease }}
-        run: |
-          $verifyArguments = @{
-            Version = $env:PACKAGE_VERSION
-          }
-          if ($env:IS_PRERELEASE -ne 'true') {
-            $verifyArguments.RequireSigning = $true
-            $verifyArguments.RequireDeferredActiveUninstall = $true
-          }
-          ./eng/verify-installer.ps1 @verifyArguments
-
-  supply-chain:
-    name: Release / checksum and SBOM skeleton
-    if: ${{ github.event_name == 'push' }}
-    needs:
-      - test
-      - installer-validation
-    runs-on: windows-2025
-    timeout-minutes: 20
-    defaults:
-      run:
-        shell: pwsh
-    steps:
-      - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Set up .NET SDK
-        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
-        with:
-          dotnet-version: 10.0.302
-
-      - name: Restore pinned WiX verification CLI
-        run: dotnet restore installer/Bundle/DistractionFirewall.Bundle.wixproj --locked-mode --nologo
-
-      - name: Download installers
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: installers-${{ github.run_id }}-${{ github.run_attempt }}
-          path: artifacts/package
-
-      - name: Generate and verify release metadata
-        env:
-          PACKAGE_VERSION: ${{ needs.test.outputs.version }}
-          IS_PRERELEASE: ${{ needs.test.outputs.is_prerelease }}
-        run: |
-          $verifyArguments = @{
-            Version = $env:PACKAGE_VERSION
-            GenerateMetadata = $true
-          }
-          if ($env:IS_PRERELEASE -ne 'true') {
-            $verifyArguments.RequireSigning = $true
-            $verifyArguments.RequireDeferredActiveUninstall = $true
-          }
-          ./eng/verify-release.ps1 @verifyArguments
-
-      - name: Upload release payload
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: release-payload-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            artifacts/package/*.msi
-            artifacts/package/*.exe
-            artifacts/package/*.sha256
-            artifacts/package/*.spdx.json
-          if-no-files-found: error
-          retention-days: 7
-
-  draft-release:
-    name: Release / draft GitHub Release
-    if: ${{ github.event_name == 'push' }}
-    needs:
-      - live-smoke-approval
-      - test
-      - supply-chain
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    permissions:
-      contents: write
-    steps:
-      - name: Verify live-smoke approval handoff
-        shell: bash
-        env:
-          APPROVED_SHA: ${{ needs.live-smoke-approval.outputs.approved_sha }}
-          APPROVED_TAG: ${{ needs.live-smoke-approval.outputs.approved_tag }}
-          RELEASE_SHA: ${{ github.sha }}
-          RELEASE_TAG: ${{ needs.test.outputs.tag }}
+          SMOKE_ARTIFACT_DIGEST: ${{ vars.WINDOWS_11_LIVE_SMOKE_ARTIFACT_DIGEST }}
+          SMOKE_ARTIFACT_ID: ${{ vars.WINDOWS_11_LIVE_SMOKE_ARTIFACT_ID }}
+          SMOKE_EVIDENCE_SHA256: ${{ vars.WINDOWS_11_LIVE_SMOKE_EVIDENCE_SHA256 }}
+          SMOKE_MANIFEST_SHA256: ${{ vars.WINDOWS_11_LIVE_SMOKE_MANIFEST_SHA256 }}
+          WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
           set -euo pipefail
-          if [[ ! "$APPROVED_SHA" =~ ^[0-9a-f]{40}$ || "$APPROVED_SHA" != "$RELEASE_SHA" ]]; then
-            echo 'The approved live-smoke SHA was not handed off exactly.' >&2
+          strict_tag_pattern='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[A-Za-z-][0-9A-Za-z-]*))*))?$'
+          if [[ "$RELEASE_REF_TYPE" != tag || "$RELEASE_REF" != "refs/tags/$RELEASE_TAG" ||
+                ! "$RELEASE_TAG" =~ $strict_tag_pattern ]]; then
+            echo 'The release event is not an exact v-prefixed SemVer tag push.' >&2
             exit 1
           fi
-          if [[ -z "$APPROVED_TAG" || "$APPROVED_TAG" != "$RELEASE_TAG" ]]; then
-            echo 'The approved live-smoke tag was not handed off exactly.' >&2
+          if [[ ! "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ || "$DEFAULT_BRANCH" != main ]]; then
+            echo 'The release SHA or default branch is invalid.' >&2
+            exit 1
+          fi
+          if [[ "$APPROVED_SHA" != "$RELEASE_SHA" || "$APPROVED_TAG" != "$RELEASE_TAG" ]]; then
+            echo 'The protected Environment approval does not exactly match this SHA and tag.' >&2
+            exit 1
+          fi
+          if [[ ! "$WORKFLOW_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ||
+                ! "$CANDIDATE_RUN_ID" =~ ^[1-9][0-9]*$ ||
+                ! "$CANDIDATE_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ||
+                ! "$CANDIDATE_ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ||
+                ! "$CANDIDATE_MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ||
+                ! "$SMOKE_EVIDENCE_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+            echo 'A candidate or Windows 11 evidence receipt variable is missing or malformed.' >&2
+            exit 1
+          fi
+          if [[ "$SMOKE_ARTIFACT_ID" != "$CANDIDATE_ARTIFACT_ID" ||
+                "$SMOKE_ARTIFACT_DIGEST" != "$CANDIDATE_ARTIFACT_DIGEST" ||
+                "$SMOKE_MANIFEST_SHA256" != "$CANDIDATE_MANIFEST_SHA256" ]]; then
+            echo 'The Windows 11 smoke attestation is not bound to the approved immutable candidate.' >&2
             exit 1
           fi
 
-      - name: Check out the pushed annotated release tag
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 1
-          persist-credentials: false
-          ref: ${{ github.ref }}
+          api() {
+            gh api -H 'Accept: application/vnd.github+json' \
+              -H 'X-GitHub-Api-Version: 2022-11-28' "$1"
+          }
 
-      - name: Download release payload
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+          branch_json="$(api "/repos/$REPOSITORY/branches/main")"
+          if [[ "$(jq -r '.name' <<<"$branch_json")" != main ||
+                "$(jq -r '.protected' <<<"$branch_json")" != true ||
+                "$(jq -r '.commit.sha' <<<"$branch_json")" != "$RELEASE_SHA" ]]; then
+            echo 'The tag commit is not the exact current protected main commit.' >&2
+            exit 1
+          fi
+
+          tag_json="$(api "/repos/$REPOSITORY/git/ref/tags/$RELEASE_TAG")"
+          tag_type="$(jq -r '.object.type' <<<"$tag_json")"
+          tag_object_sha="$(jq -r '.object.sha' <<<"$tag_json")"
+          if [[ "$(jq -r '.ref' <<<"$tag_json")" != "refs/tags/$RELEASE_TAG" || "$tag_type" != tag ]]; then
+            echo 'The release ref must be an annotated tag.' >&2
+            exit 1
+          fi
+          for _ in {1..8}; do
+            [[ "$tag_object_sha" =~ ^[0-9a-f]{40}$ ]] || {
+              echo 'The annotated tag contains an invalid object SHA.' >&2
+              exit 1
+            }
+            if [[ "$tag_type" == commit ]]; then
+              break
+            fi
+            [[ "$tag_type" == tag ]] || {
+              echo 'The annotated tag does not resolve to a commit.' >&2
+              exit 1
+            }
+            tag_object_json="$(api "/repos/$REPOSITORY/git/tags/$tag_object_sha")"
+            tag_type="$(jq -r '.object.type' <<<"$tag_object_json")"
+            tag_object_sha="$(jq -r '.object.sha' <<<"$tag_object_json")"
+          done
+          if [[ "$tag_type" != commit || "$tag_object_sha" != "$RELEASE_SHA" ]]; then
+            echo 'The annotated tag does not resolve exactly to the release commit.' >&2
+            exit 1
+          fi
+
+          run_json="$(api "/repos/$REPOSITORY/actions/runs/$CANDIDATE_RUN_ID")"
+          run_attempt="$(jq -r '.run_attempt' <<<"$run_json")"
+          if [[ "$(jq -r '.id' <<<"$run_json")" != "$CANDIDATE_RUN_ID" ||
+                "$(jq -r '.path' <<<"$run_json")" != '.github/workflows/release-candidate.yml' ||
+                "$(jq -r '.event' <<<"$run_json")" != workflow_dispatch ||
+                "$(jq -r '.head_branch' <<<"$run_json")" != main ||
+                "$(jq -r '.head_sha' <<<"$run_json")" != "$RELEASE_SHA" ||
+                "$(jq -r '.head_repository.full_name' <<<"$run_json")" != "$REPOSITORY" ||
+                "$(jq -r '.status' <<<"$run_json")" != completed ||
+                "$(jq -r '.conclusion' <<<"$run_json")" != success ||
+                ! "$run_attempt" =~ ^[1-9][0-9]*$ ]]; then
+            echo 'The approved candidate run is not a successful trusted release-candidate run for this commit.' >&2
+            exit 1
+          fi
+
+          version="${RELEASE_TAG#v}"
+          expected_artifact_name="release-candidate-$version-$RELEASE_SHA-$CANDIDATE_RUN_ID-$run_attempt"
+          artifact_json="$(api "/repos/$REPOSITORY/actions/artifacts/$CANDIDATE_ARTIFACT_ID")"
+          if [[ "$(jq -r '.id' <<<"$artifact_json")" != "$CANDIDATE_ARTIFACT_ID" ||
+                "$(jq -r '.name' <<<"$artifact_json")" != "$expected_artifact_name" ||
+                "$(jq -r '.expired' <<<"$artifact_json")" != false ||
+                "$(jq -r '.digest' <<<"$artifact_json")" != "$CANDIDATE_ARTIFACT_DIGEST" ||
+                "$(jq -r '.workflow_run.id' <<<"$artifact_json")" != "$CANDIDATE_RUN_ID" ||
+                "$(jq -r '.workflow_run.head_branch' <<<"$artifact_json")" != main ||
+                "$(jq -r '.workflow_run.head_sha' <<<"$artifact_json")" != "$RELEASE_SHA" ||
+                "$(jq -r '.size_in_bytes' <<<"$artifact_json")" -le 0 ]]; then
+            echo 'The immutable artifact API metadata does not match the approved candidate receipt.' >&2
+            exit 1
+          fi
+
+          {
+            echo "approval_run_attempt=$WORKFLOW_RUN_ATTEMPT"
+            echo "artifact_digest=$CANDIDATE_ARTIFACT_DIGEST"
+            echo "artifact_id=$CANDIDATE_ARTIFACT_ID"
+            echo "artifact_name=$expected_artifact_name"
+            echo "candidate_run_attempt=$run_attempt"
+            echo "candidate_run_id=$CANDIDATE_RUN_ID"
+            echo "evidence_sha256=$SMOKE_EVIDENCE_SHA256"
+            echo "manifest_sha256=$CANDIDATE_MANIFEST_SHA256"
+            echo "release_sha=$RELEASE_SHA"
+            echo "release_tag=$RELEASE_TAG"
+            echo "version=$version"
+          } >> "$GITHUB_OUTPUT"
+
+  draft-release:
+    name: Release / promote tested bytes to draft
+    needs: promotion-approval
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      artifact-metadata: write
+      attestations: write
+      contents: write
+      id-token: write
+    steps:
+      - name: Download exact candidate archive by immutable artifact ID
+        shell: bash
+        env:
+          APPROVAL_RUN_ATTEMPT: ${{ needs.promotion-approval.outputs.approval_run_attempt }}
+          ARTIFACT_DIGEST: ${{ needs.promotion-approval.outputs.artifact_digest }}
+          ARTIFACT_ID: ${{ needs.promotion-approval.outputs.artifact_id }}
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$WORKFLOW_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ||
+                "$APPROVAL_RUN_ATTEMPT" != "$WORKFLOW_RUN_ATTEMPT" ]]; then
+            echo 'The Environment approval is from a different workflow attempt; use Re-run all jobs and approve again.' >&2
+            exit 1
+          fi
+          gh api -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "/repos/$REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > candidate.zip
+          actual_digest="sha256:$(sha256sum candidate.zip | awk '{print $1}')"
+          if [[ "$actual_digest" != "$ARTIFACT_DIGEST" ]]; then
+            echo "Candidate archive digest mismatch: $actual_digest" >&2
+            exit 1
+          fi
+          mkdir candidate
+          while IFS= read -r entry; do
+            if [[ -z "$entry" || "$entry" == */ || "$entry" == *'/'* ||
+                  "$entry" == *'\'* || "$entry" == .* || "$entry" == *..* ]]; then
+              echo "Unsafe or nested artifact archive entry: $entry" >&2
+              exit 1
+            fi
+          done < <(zipinfo -1 candidate.zip)
+          unzip -q candidate.zip -d candidate
+
+      - name: Verify manifest, exact payload, checksums, and provenance
+        shell: bash
+        env:
+          ARTIFACT_NAME: ${{ needs.promotion-approval.outputs.artifact_name }}
+          CANDIDATE_RUN_ATTEMPT: ${{ needs.promotion-approval.outputs.candidate_run_attempt }}
+          CANDIDATE_RUN_ID: ${{ needs.promotion-approval.outputs.candidate_run_id }}
+          GH_TOKEN: ${{ github.token }}
+          MANIFEST_SHA256: ${{ needs.promotion-approval.outputs.manifest_sha256 }}
+          RELEASE_SHA: ${{ needs.promotion-approval.outputs.release_sha }}
+          REPOSITORY: ${{ github.repository }}
+          VERSION: ${{ needs.promotion-approval.outputs.version }}
+        run: |
+          set -euo pipefail
+          manifest="candidate/distraction-firewall-$VERSION.candidate-manifest.json"
+          subjects="candidate/distraction-firewall-$VERSION.candidate-subjects.sha256"
+          provenance="candidate/distraction-firewall-$VERSION.provenance.bundle.json"
+          actual_manifest_sha="$(sha256sum "$manifest" | awk '{print $1}')"
+          [[ "$actual_manifest_sha" == "$MANIFEST_SHA256" ]] || {
+            echo 'Candidate manifest digest mismatch.' >&2
+            exit 1
+          }
+          jq -e \
+            --arg repository "$REPOSITORY" \
+            --arg sha "$RELEASE_SHA" \
+            --arg version "$VERSION" \
+            --arg workflowRef "$REPOSITORY/.github/workflows/release-candidate.yml@refs/heads/main" \
+            --argjson runId "$CANDIDATE_RUN_ID" \
+            --argjson runAttempt "$CANDIDATE_RUN_ATTEMPT" \
+            '.schema == "distraction-firewall/build-once-candidate/v1" and
+             .version == $version and
+             .source.repository == $repository and
+             .source.commitSha == $sha and
+             .source.ref == "refs/heads/main" and
+             .source.workflowPath == ".github/workflows/release-candidate.yml" and
+             .source.workflowRef == $workflowRef and
+             .source.workflowRunId == $runId and
+             .source.workflowRunAttempt == $runAttempt and
+             .source.artifactId == null and
+             .source.artifactDigestSha256 == null and
+             (.artifacts | keys) == ["appMsi", "checksum", "runtimeMsi", "sbom", "setupExe"] and
+             (.signing | keys) == ["configured", "disclosure", "outerPackageStatuses"]' "$manifest" >/dev/null
+
+          expected_artifact_name="release-candidate-$VERSION-$RELEASE_SHA-$CANDIDATE_RUN_ID-$CANDIDATE_RUN_ATTEMPT"
+          [[ "$ARTIFACT_NAME" == "$expected_artifact_name" ]] || {
+            echo 'Candidate artifact name does not match the manifest build identity.' >&2
+            exit 1
+          }
+          expected_names=(
+            "distraction-firewall-$VERSION.candidate-manifest.json"
+            "distraction-firewall-$VERSION.candidate-subjects.sha256"
+            "distraction-firewall-$VERSION.hosted-evidence.json"
+            "distraction-firewall-$VERSION.provenance.bundle.json"
+            "distraction-firewall-$VERSION.sha256"
+            "distraction-firewall-$VERSION.spdx.json"
+            "distraction-firewall-app-$VERSION-win-x64.msi"
+            "distraction-firewall-runtime-$VERSION-win-x64.msi"
+            "distraction-firewall-setup-$VERSION-win-x64.exe"
+          )
+          mapfile -t actual_names < <(
+            find candidate -maxdepth 1 \( -type f -o -type l \) -printf '%f\n' | LC_ALL=C sort
+          )
+          mapfile -t sorted_expected_names < <(printf '%s\n' "${expected_names[@]}" | LC_ALL=C sort)
+          diff -u <(printf '%s\n' "${sorted_expected_names[@]}") <(printf '%s\n' "${actual_names[@]}")
+
+          while IFS=$'\t' read -r file_name expected_hash expected_size; do
+            file_path="candidate/$file_name"
+            [[ -f "$file_path" && ! -L "$file_path" ]] || {
+              echo "Manifest subject is missing or is a symlink: $file_name" >&2
+              exit 1
+            }
+            [[ "$(sha256sum "$file_path" | awk '{print $1}')" == "$expected_hash" ]] || {
+              echo "Manifest subject hash mismatch: $file_name" >&2
+              exit 1
+            }
+            [[ "$(stat -c '%s' "$file_path")" == "$expected_size" ]] || {
+              echo "Manifest subject size mismatch: $file_name" >&2
+              exit 1
+            }
+          done < <(jq -r '.artifacts | to_entries[] | [.value.fileName, .value.sha256, (.value.sizeBytes|tostring)] | @tsv' "$manifest")
+
+          (cd candidate && sha256sum --strict --check "distraction-firewall-$VERSION.sha256")
+          (cd candidate && sha256sum --strict --check "distraction-firewall-$VERSION.candidate-subjects.sha256")
+          while IFS= read -r subject_name; do
+            gh attestation verify "candidate/$subject_name" \
+              --repo "$REPOSITORY" \
+              --bundle "$provenance" \
+              --signer-workflow "$REPOSITORY/.github/workflows/release-candidate.yml" \
+              --source-digest "$RELEASE_SHA" \
+              --source-ref refs/heads/main \
+              --deny-self-hosted-runners >/dev/null
+          done < <(awk '{print $2}' "$subjects")
+
+      - name: Create reviewed smoke binding
+        shell: bash
+        env:
+          ARTIFACT_DIGEST: ${{ needs.promotion-approval.outputs.artifact_digest }}
+          ARTIFACT_ID: ${{ needs.promotion-approval.outputs.artifact_id }}
+          ARTIFACT_NAME: ${{ needs.promotion-approval.outputs.artifact_name }}
+          CANDIDATE_RUN_ID: ${{ needs.promotion-approval.outputs.candidate_run_id }}
+          EVIDENCE_SHA256: ${{ needs.promotion-approval.outputs.evidence_sha256 }}
+          GH_TOKEN: ${{ github.token }}
+          MANIFEST_SHA256: ${{ needs.promotion-approval.outputs.manifest_sha256 }}
+          RELEASE_SHA: ${{ needs.promotion-approval.outputs.release_sha }}
+          RELEASE_TAG: ${{ needs.promotion-approval.outputs.release_tag }}
+          REPOSITORY: ${{ github.repository }}
+          VERSION: ${{ needs.promotion-approval.outputs.version }}
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" --repo "$REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists; refusing to overwrite it." >&2
+            exit 1
+          fi
+          promotion_path="candidate/distraction-firewall-$VERSION.windows11-smoke-promotion.json"
+          [[ ! -e "$promotion_path" && ! -L "$promotion_path" ]] || {
+            echo 'The candidate archive preoccupied the smoke-promotion record path.' >&2
+            exit 1
+          }
+          jq -n \
+            --arg actor "$GITHUB_ACTOR" \
+            --arg artifactDigest "$ARTIFACT_DIGEST" \
+            --arg artifactId "$ARTIFACT_ID" \
+            --arg artifactName "$ARTIFACT_NAME" \
+            --arg evidenceSha256 "$EVIDENCE_SHA256" \
+            --arg manifestSha256 "$MANIFEST_SHA256" \
+            --arg releaseSha "$RELEASE_SHA" \
+            --arg releaseTag "$RELEASE_TAG" \
+            --arg runId "$CANDIDATE_RUN_ID" \
+            '{
+              schema: "distraction-firewall/windows11-smoke-promotion/v1",
+              result: "approved",
+              workflowActor: $actor,
+              release: { tag: $releaseTag, commitSha: $releaseSha },
+              candidate: {
+                workflowRunId: ($runId | tonumber),
+                artifactId: ($artifactId | tonumber),
+                artifactName: $artifactName,
+                artifactDigest: $artifactDigest,
+                manifestSha256: $manifestSha256
+              },
+              localSmokeEvidenceSha256: $evidenceSha256
+            }' > "$promotion_path"
+
+      - name: Attest reviewed smoke binding
+        id: smoke_promotion_provenance
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
         with:
-          name: release-payload-${{ github.run_id }}-${{ github.run_attempt }}
-          path: release
+          subject-path: candidate/distraction-firewall-${{ needs.promotion-approval.outputs.version }}.windows11-smoke-promotion.json
+
+      - name: Add offline-verifiable smoke-promotion provenance bundle
+        shell: bash
+        env:
+          BUNDLE_PATH: ${{ steps.smoke_promotion_provenance.outputs.bundle-path }}
+          VERSION: ${{ needs.promotion-approval.outputs.version }}
+        run: |
+          set -euo pipefail
+          [[ -f "$BUNDLE_PATH" && ! -L "$BUNDLE_PATH" ]] || {
+            echo 'actions/attest did not produce a regular smoke-promotion provenance bundle.' >&2
+            exit 1
+          }
+          destination="candidate/distraction-firewall-$VERSION.windows11-smoke-promotion.provenance.bundle.json"
+          [[ ! -e "$destination" && ! -L "$destination" ]] || {
+            echo 'The candidate archive preoccupied the smoke-promotion provenance path.' >&2
+            exit 1
+          }
+          cp -- "$BUNDLE_PATH" "$destination"
 
       - name: Create immutable-ready draft Release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ needs.test.outputs.tag }}
-          PACKAGE_VERSION: ${{ needs.test.outputs.version }}
-          IS_PRERELEASE: ${{ needs.test.outputs.is_prerelease }}
+          RELEASE_SHA: ${{ needs.promotion-approval.outputs.release_sha }}
+          RELEASE_TAG: ${{ needs.promotion-approval.outputs.release_tag }}
+          REPOSITORY: ${{ github.repository }}
+          VERSION: ${{ needs.promotion-approval.outputs.version }}
         run: |
           set -euo pipefail
-          expected_ref="refs/tags/${RELEASE_TAG}"
-          if [[ "$GITHUB_REF" != "$expected_ref" ]]; then
-            echo "Release ref mismatch: expected $expected_ref, received $GITHUB_REF" >&2
-            exit 1
-          fi
-          tag_type="$(git cat-file -t "$expected_ref")"
-          checked_out_commit="$(git rev-parse HEAD)"
-          tagged_commit="$(git rev-parse "${expected_ref}^{commit}")"
-          if [[ "$tag_type" != "tag" || "$checked_out_commit" != "$GITHUB_SHA" || "$tagged_commit" != "$GITHUB_SHA" ]]; then
-            echo 'The local annotated tag, checked-out commit, and pushed commit do not match.' >&2
-            exit 1
-          fi
 
-          release_flags=(--draft --verify-tag --title "Distraction Firewall ${PACKAGE_VERSION}")
-          if [[ "$IS_PRERELEASE" == "true" ]]; then
-            release_flags+=(--prerelease)
-            release_notes=$'Alpha prerelease. This build is unsigned. Hosted CI verifies format/tests, MSI tables, protected ACL/service authoring, administrative-image extraction, Burn attached-payload hashes, checksums, and the SPDX distribution inventory.\n\nPre-tag Windows 11 validation: the exact source commit accepted by this workflow passed a maintainer-attested live Windows 11 source smoke before tagging. The attached release artifacts are rebuilt by GitHub Actions and have not yet passed the manual isolated-runner artifact smoke. This Release must remain a draft and must not be published until that smoke succeeds and its evidence is reviewed.\n\nThe installed finalizer performs a race-safe, fail-closed active-removal check under the capsule-store lock, but automatic Runtime/Bundle removal after the lease deadline and destructive VM evidence remain pending. If Bundle uninstall reaches an active Runtime, App is removed first and Runtime remains; retry Setup after lease expiry. DisableRollback also means a failed install may leave Runtime installed, and rerunning Setup is the recovery path.\n\nVersion 0.1 must be installed by the same signed-in Windows account that will run the App. Over-the-shoulder elevation using another administrator account and LocalSystem/SYSTEM-managed deployment are unsupported.\n\nKnown enforcement alpha limits: an initial set of zero public target IPs fails activation with ActivationFailed. Seed discovery covers only the exact and www target hostnames and does not enumerate every googlevideo hostname; it is a floor, not a coverage guarantee. If the public target-IP set later falls to zero during an Active lease, health becomes Degraded. Immediate termination of dynamic YouTube CDN connections already established when a lease begins is not yet proven. A changed DHCP resolver on an already-owned interface is not refreshed during an active lease; only the initial snapshot and newly discovered interfaces are used.\n\nThe SPDX file is a distribution-artifact inventory skeleton, not a complete dependency SBOM.'
+          manifest_signing="$(jq -r '.signing.configured' "candidate/distraction-firewall-$VERSION.candidate-manifest.json")"
+          if [[ "$VERSION" == *-* ]]; then
+            prerelease_flag=(--prerelease)
+            if [[ "$manifest_signing" == true ]]; then
+              alpha_header='Alpha prerelease. The candidate manifest records Valid Authenticode status for all three outer packages; inner PE signing is not claimed.'
+            else
+              alpha_header='Alpha prerelease. This build is unsigned.'
+            fi
+            notes="$alpha_header"$'\n\nBuild once / promote same bytes: GitHub Actions built and sealed the candidate exactly once from the current protected-main commit. A maintainer then ran the one-UAC Windows 11 smoke against that exact artifact ID, archive digest, and manifest digest. This draft attaches the same payload bytes downloaded by immutable artifact ID; the promotion workflow does not rebuild or resign them.\n\nThe one-UAC smoke covers installer/service recovery, standard-user CLI/UI checks, and uninstall/residual verification. It deliberately does not start a restriction lease and does not claim a live YouTube network-enforcement E2E result.\n\nThis Release remains a draft until its assets, provenance, and smoke evidence are reviewed. Version 0.1 must be installed by the same signed-in Windows account that will run the App. Over-the-shoulder elevation using another administrator account and LocalSystem/SYSTEM-managed deployment are unsupported.\n\nThe SPDX file is a distribution-artifact inventory skeleton, not a complete dependency SBOM. GitHub provenance covers the candidate subjects, and a separate GitHub attestation binds the Windows 11 promotion record and reviewed local evidence digest to the immutable Actions artifact.'
           else
-            release_notes=$'Stable-candidate draft only — publication is prohibited. The exact source commit passed a pre-tag, maintainer-attested live Windows 11 source smoke, but the attached release artifacts have not yet passed the manual isolated-runner artifact smoke and must not be published until that evidence is reviewed. The current Authenticode gate covers only the two outer MSI files and Setup EXE. Inner PE payload signing/verification, destructive network E2E on a real Windows 11 client, a complete dependency SBOM, and provenance/attestation are not implemented. A valid outer signature plus a nonempty deferred-uninstall evidence array is a mechanical packaging gate, not release approval. Do not publish until those controls and the reviewed Windows 11 evidence are complete.'
+            prerelease_flag=()
+            notes=$'Stable-candidate draft. GitHub Actions built and sealed the candidate exactly once from the current protected-main commit. A maintainer ran the one-UAC Windows 11 installer/service recovery, standard-user CLI/UI, and uninstall smoke against that exact artifact ID, archive digest, and manifest digest. The smoke deliberately does not start a restriction lease and does not claim live YouTube network-enforcement E2E coverage. This draft attaches those same bytes without rebuilding. Publication requires a separate protected release-publication approval and a complete review of signatures, provenance, SBOM scope, and smoke evidence.'
           fi
-          gh release create "$RELEASE_TAG" release/* "${release_flags[@]}" --notes "$release_notes"
+          gh release create "$RELEASE_TAG" \
+            --repo "$REPOSITORY" \
+            candidate/* \
+            --draft \
+            --target "$RELEASE_SHA" \
+            --verify-tag \
+            --title "Distraction Firewall $VERSION" \
+            "${prerelease_flag[@]}" \
+            --notes "$notes"
 
-  windows11-smoke:
-    name: Manual / isolated Windows 11 install and uninstall
-    # The runner access policy must permit only
-    # Motoki0705/distraction-firewall/.github/workflows/release.yml@refs/heads/main.
-    # The job-level guard also prevents a trusted copy of this workflow from
-    # dispatching the elevated job from another ref.
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_windows11_smoke && github.ref == 'refs/heads/main' }}
-    runs-on: [self-hosted, Windows, X64, windows-11]
-    timeout-minutes: 45
-    environment: windows-11-destructive-smoke
-    permissions:
-      contents: read
-    defaults:
-      run:
-        shell: pwsh
-    steps:
-      - name: Validate trusted source and destructive runner before checkout
-        id: metadata
-        env:
-          API_URL: ${{ github.api_url }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-          DISPATCH_REF: ${{ github.ref }}
-          DISPATCH_SHA: ${{ github.sha }}
-          GH_TOKEN: ${{ github.token }}
-          ISOLATED_CONFIRMATION: ${{ inputs.confirm_isolated_test_machine }}
-          RELEASE_COMMIT: ${{ inputs.release_commit }}
-          RELEASE_TAG: ${{ inputs.release_tag }}
-          REPOSITORY: ${{ github.repository }}
-        run: |
-          Set-StrictMode -Version Latest
-          $ErrorActionPreference = 'Stop'
-
-          if ($env:DISPATCH_REF -cne 'refs/heads/main' -or $env:DEFAULT_BRANCH -cne 'main') {
-            throw 'The elevated smoke workflow must be dispatched from the protected main branch.'
-          }
-          if ($env:DISPATCH_SHA -notmatch '^[0-9a-fA-F]{40}$') {
-            throw 'The workflow dispatch SHA is not a full commit SHA.'
-          }
-          if ($env:ISOLATED_CONFIRMATION -cne 'ISOLATED-WINDOWS-11-RUNNER') {
-            throw 'Refusing destructive installer smoke: confirmation must be ISOLATED-WINDOWS-11-RUNNER.'
-          }
-
-          $versionMatch = [regex]::Match(
-            $env:RELEASE_TAG,
-            '^v(?<version>(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:0|[1-9]\d*|[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|[A-Za-z-][0-9A-Za-z-]*))*)?)$'
-          )
-          if (-not $versionMatch.Success) {
-            throw "Release tag must be v-prefixed SemVer without build metadata: $env:RELEASE_TAG"
-          }
-          if ($env:RELEASE_COMMIT -notmatch '^[0-9a-fA-F]{40}$') {
-            throw 'release_commit must be an exact 40-character commit SHA.'
-          }
-
-          $headers = @{
-            Accept = 'application/vnd.github+json'
-            Authorization = "Bearer $env:GH_TOKEN"
-            'X-GitHub-Api-Version' = '2022-11-28'
-          }
-
-          function Get-TrustedGitHubObject {
-            param([Parameter(Mandatory)][string]$RelativePath)
-
-            $uri = "$($env:API_URL.TrimEnd('/'))/repos/$env:REPOSITORY/$RelativePath"
-            try {
-              return Invoke-RestMethod -Method Get -Uri $uri -Headers $headers -ErrorAction Stop
-            }
-            catch {
-              throw "GitHub API trust validation failed for $RelativePath."
-            }
-          }
-
-          function Assert-FullCommitSha {
-            param(
-              [Parameter(Mandatory)][string]$Value,
-              [Parameter(Mandatory)][string]$Description
-            )
-
-            if ($Value -notmatch '^[0-9a-fA-F]{40}$') {
-              throw "$Description is not a full commit SHA."
-            }
-          }
-
-          $releaseCommit = $env:RELEASE_COMMIT.ToLowerInvariant()
-          $dispatchCommit = $env:DISPATCH_SHA.ToLowerInvariant()
-          $escapedTag = [Uri]::EscapeDataString($env:RELEASE_TAG)
-          $tagRef = Get-TrustedGitHubObject -RelativePath "git/ref/tags/$escapedTag"
-          if ([string]$tagRef.ref -cne "refs/tags/$env:RELEASE_TAG") {
-            throw 'GitHub returned a different tag ref than the requested release tag.'
-          }
-
-          $tagObjectType = [string]$tagRef.object.type
-          $tagObjectSha = ([string]$tagRef.object.sha).ToLowerInvariant()
-          $seenTagObjects = [System.Collections.Generic.HashSet[string]]::new(
-            [System.StringComparer]::OrdinalIgnoreCase
-          )
-          for ($depth = 0; $depth -lt 8 -and $tagObjectType -ceq 'tag'; $depth++) {
-            Assert-FullCommitSha -Value $tagObjectSha -Description 'Annotated tag object SHA'
-            if (-not $seenTagObjects.Add($tagObjectSha)) {
-              throw 'The release tag contains a tag-object cycle.'
-            }
-            $tagObject = Get-TrustedGitHubObject -RelativePath "git/tags/$tagObjectSha"
-            $tagObjectType = [string]$tagObject.object.type
-            $tagObjectSha = ([string]$tagObject.object.sha).ToLowerInvariant()
-          }
-          if ($tagObjectType -cne 'commit') {
-            throw 'The release tag does not resolve directly or transitively to a commit within the allowed depth.'
-          }
-          Assert-FullCommitSha -Value $tagObjectSha -Description 'Release tag commit SHA'
-          if ($tagObjectSha -cne $releaseCommit) {
-            throw 'release_commit does not match the commit referenced by release_tag.'
-          }
-
-          $mainRef = Get-TrustedGitHubObject -RelativePath 'git/ref/heads/main'
-          if ([string]$mainRef.ref -cne 'refs/heads/main' -or [string]$mainRef.object.type -cne 'commit') {
-            throw 'The protected main ref did not resolve to a commit.'
-          }
-          $mainCommit = ([string]$mainRef.object.sha).ToLowerInvariant()
-          Assert-FullCommitSha -Value $mainCommit -Description 'Protected main commit SHA'
-
-          foreach ($candidate in @(
-            [pscustomobject]@{ Sha = $dispatchCommit; Description = 'Workflow dispatch commit' },
-            [pscustomobject]@{ Sha = $releaseCommit; Description = 'Release tag commit' }
-          )) {
-            Assert-FullCommitSha -Value $candidate.Sha -Description $candidate.Description
-            $comparison = Get-TrustedGitHubObject -RelativePath "compare/$($candidate.Sha)...$mainCommit"
-            $mergeBase = ([string]$comparison.merge_base_commit.sha).ToLowerInvariant()
-            $status = [string]$comparison.status
-            if ($mergeBase -cne $candidate.Sha -or $status -notin @('ahead', 'identical')) {
-              throw "$($candidate.Description) is not reachable from protected main."
-            }
-          }
-
-          $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-          $principal = [Security.Principal.WindowsPrincipal]::new($identity)
-          if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-            throw 'The isolated Windows 11 runner must execute elevated.'
-          }
-          $unsupportedOwnerSids = @(
-            'S-1-0-0', 'S-1-1-0', 'S-1-2-0', 'S-1-5-7', 'S-1-5-11',
-            'S-1-5-18', 'S-1-5-19', 'S-1-5-20',
-            'S-1-5-32-544', 'S-1-5-32-545', 'S-1-5-32-546'
-          )
-          if ($null -eq $identity.User -or $identity.User.Value -in $unsupportedOwnerSids) {
-            throw 'Version 0.1 smoke must run interactively as the same concrete Windows account that will own the App; SYSTEM/service/broad principals are unsupported.'
-          }
-          if (-not [Environment]::Is64BitOperatingSystem) {
-            throw 'The isolated runner is not x64.'
-          }
-          $currentVersion = Get-ItemProperty -LiteralPath 'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
-          if ($currentVersion.InstallationType -cne 'Client' -or [int]$currentVersion.CurrentBuildNumber -lt 22000) {
-            throw 'The isolated runner must be a Windows 11 client, build 22000 or newer.'
-          }
-
-          "commit_sha=$releaseCommit" >> $env:GITHUB_OUTPUT
-          "release_tag=$env:RELEASE_TAG" >> $env:GITHUB_OUTPUT
-          "version=$($versionMatch.Groups['version'].Value)" >> $env:GITHUB_OUTPUT
-
-      - name: Check out the validated release commit
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          clean: true
-          fetch-depth: 1
-          persist-credentials: false
-          ref: ${{ steps.metadata.outputs.commit_sha }}
-
-      - name: Verify checked-out commit identity
-        env:
-          EXPECTED_COMMIT: ${{ steps.metadata.outputs.commit_sha }}
-        run: |
-          $actualCommit = (git rev-parse HEAD).Trim().ToLowerInvariant()
-          if ($actualCommit -cne $env:EXPECTED_COMMIT) {
-            throw "Checkout resolved to $actualCommit instead of the validated commit."
-          }
-
-      - name: Set up .NET SDK
-        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
-        with:
-          dotnet-version: 10.0.302
-
-      - name: Restore pinned WiX verification CLI
-        run: dotnet restore installer/Bundle/DistractionFirewall.Bundle.wixproj --locked-mode --nologo
-
-      - name: Download and verify draft Release payload
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ steps.metadata.outputs.release_tag }}
-          PACKAGE_VERSION: ${{ steps.metadata.outputs.version }}
-        run: |
-          $packageDirectory = Join-Path $PWD 'artifacts\package'
-          $null = New-Item -ItemType Directory -Path $packageDirectory -Force
-          gh release download $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY --dir $packageDirectory
-          if ($LASTEXITCODE -ne 0) {
-            throw "Could not download draft Release $env:RELEASE_TAG."
-          }
-          $verifyArguments = @{
-            Version = $env:PACKAGE_VERSION
-            PackageDirectory = $packageDirectory
-          }
-          if (-not $env:PACKAGE_VERSION.Contains('-')) {
-            $verifyArguments.RequireSigning = $true
-            $verifyArguments.RequireDeferredActiveUninstall = $true
-          }
-          ./eng/verify-release.ps1 @verifyArguments
-
-      - name: Exercise install, service, active refusal, and independent removal
-        env:
-          PACKAGE_VERSION: ${{ steps.metadata.outputs.version }}
-        run: |
-          Set-StrictMode -Version Latest
-          $ErrorActionPreference = 'Stop'
-          $serviceName = 'DistractionFirewallActivation'
-          $packageDirectory = Join-Path $PWD 'artifacts\package'
-          $appMsi = Join-Path $packageDirectory "distraction-firewall-app-$env:PACKAGE_VERSION-win-x64.msi"
-          $runtimeMsi = Join-Path $packageDirectory "distraction-firewall-runtime-$env:PACKAGE_VERSION-win-x64.msi"
-          $setup = Join-Path $packageDirectory "distraction-firewall-setup-$env:PACKAGE_VERSION-win-x64.exe"
-          $logDirectory = Join-Path $env:RUNNER_TEMP 'distraction-firewall-windows11-smoke-logs'
-          $null = New-Item -ItemType Directory -Path $logDirectory -Force
-          $programFilesRoot = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)
-          $programDataRoot = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
-          $appRoot = Join-Path $programFilesRoot 'Distraction Firewall'
-          $runtimeRoot = Join-Path $programFilesRoot 'Distraction Firewall Lease Runtime'
-          $dataRoot = Join-Path $programDataRoot 'DistractionFirewall\Runtime\v1'
-          $activeMarker = Join-Path $dataRoot 'active-lease.json'
-          $seedRegistry = 'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Motoki0705\DistractionFirewall\Runtime'
-          $fixture = '{"installer_smoke_fixture":true}'
-          $msiexec = Join-Path $env:SystemRoot 'System32\msiexec.exe'
-          $setupAttempted = $false
-
-          function Invoke-NativeProcess {
-            param([string]$Path, [string[]]$Arguments)
-            $startInfo = [Diagnostics.ProcessStartInfo]::new()
-            $startInfo.FileName = $Path
-            $startInfo.UseShellExecute = $false
-            $startInfo.CreateNoWindow = $true
-            foreach ($argument in $Arguments) {
-              $null = $startInfo.ArgumentList.Add($argument)
-            }
-            $process = [Diagnostics.Process]::Start($startInfo)
-            if ($null -eq $process) {
-              throw "Could not start native process: $Path"
-            }
-            try {
-              $process.WaitForExit()
-              return $process.ExitCode
-            }
-            finally {
-              $process.Dispose()
-            }
-          }
-
-          function Invoke-ExpectSuccess {
-            param([string]$Path, [string[]]$Arguments, [string]$Description)
-            $exitCode = Invoke-NativeProcess -Path $Path -Arguments $Arguments
-            if ($exitCode -notin @(0, 3010)) {
-              throw "$Description failed with exit code $exitCode."
-            }
-          }
-
-          try {
-            if ((Get-Service -Name $serviceName -ErrorAction SilentlyContinue) -or
-                (Test-Path -LiteralPath $appRoot) -or
-                (Test-Path -LiteralPath $runtimeRoot) -or
-                (Test-Path -LiteralPath $dataRoot) -or
-                (Test-Path -LiteralPath $seedRegistry)) {
-              throw 'The destructive runner is not clean; refusing to touch a prior installation or Runtime data.'
-            }
-            $installedEntries = @(
-              Get-ItemProperty 'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue
-              Get-ItemProperty 'Registry::HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*' -ErrorAction SilentlyContinue
-            ) | Where-Object { $_.DisplayName -like 'Distraction Firewall*' }
-            if (@($installedEntries).Count -ne 0) {
-              throw 'A Distraction Firewall ARP registration already exists on the destructive runner.'
-            }
-
-            $setupAttempted = $true
-            Invoke-ExpectSuccess -Path $setup -Arguments @(
-              '-install', '-quiet', '-norestart', '-log', (Join-Path $logDirectory 'setup-install.log')
-            ) -Description 'Bundle install'
-
-            $service = Get-CimInstance Win32_Service -Filter "Name='$serviceName'"
-            if ($null -eq $service -or $service.State -ne 'Running' -or $service.StartMode -ne 'Auto' -or
-                $service.StartName -notin @('LocalSystem', 'NT AUTHORITY\SYSTEM')) {
-              throw 'ActivationService is not running as automatic LocalSystem after install.'
-            }
-            if ($service.PathName -notmatch [regex]::Escape($runtimeRoot) -or $service.PathName -notmatch '--service') {
-              throw "ActivationService ImagePath is not the fixed Runtime path with --service: $($service.PathName)"
-            }
-            $serviceRegistry = Get-ItemProperty -LiteralPath "Registry::HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Services\$serviceName"
-            if ($serviceRegistry.DelayedAutoStart -ne 1) {
-              throw 'ActivationService is not delayed automatic start.'
-            }
-            $failureOutput = @(& sc.exe qfailure $serviceName 2>&1)
-            [IO.File]::WriteAllLines((Join-Path $logDirectory 'service-qfailure.txt'), [string[]]$failureOutput)
-            if ($LASTEXITCODE -ne 0 -or $null -eq $serviceRegistry.FailureActions) {
-              throw 'ActivationService failure actions are unavailable.'
-            }
-
-            $cli = Join-Path $appRoot 'cli\distraction-firewall-cli.exe'
-            $diagnoseOutput = @(& $cli diagnose --json 2>&1)
-            [IO.File]::WriteAllLines((Join-Path $logDirectory 'diagnose.json'), [string[]]$diagnoseOutput)
-            if ($LASTEXITCODE -ne 0) {
-              throw "CLI diagnose failed with exit code $LASTEXITCODE."
-            }
-            $null = ($diagnoseOutput -join [Environment]::NewLine) | ConvertFrom-Json
-
-            [IO.File]::WriteAllText($activeMarker, $fixture, [Text.UTF8Encoding]::new($false))
-            $activeUninstallExitCode = Invoke-NativeProcess -Path $msiexec -Arguments @(
-              '/x', $runtimeMsi, '/qn', '/norestart', '/L*v', (Join-Path $logDirectory 'runtime-active-uninstall.log')
-            )
-            if ($activeUninstallExitCode -ne 1603) {
-              throw "Runtime active-marker uninstall must fail with 1603; actual exit code: $activeUninstallExitCode"
-            }
-            $deadline = [DateTime]::UtcNow.AddSeconds(20)
-            do {
-              $serviceAfterRefusal = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
-              if ($null -ne $serviceAfterRefusal -and $serviceAfterRefusal.Status -eq 'Running') {
-                break
-              }
-              Start-Sleep -Seconds 1
-            } while ([DateTime]::UtcNow -lt $deadline)
-            if ($null -eq $serviceAfterRefusal -or $serviceAfterRefusal.Status -ne 'Running' -or
-                -not (Test-Path -LiteralPath $runtimeRoot) -or
-                -not (Test-Path -LiteralPath $activeMarker)) {
-              throw 'Active Runtime refusal did not leave the service and protected data intact.'
-            }
-            if ([IO.File]::ReadAllText($activeMarker) -cne $fixture) {
-              throw 'Active Runtime refusal changed the active marker fixture.'
-            }
-            Remove-Item -LiteralPath $activeMarker -Force
-
-            Invoke-ExpectSuccess -Path $msiexec -Arguments @(
-              '/x', $appMsi, '/qn', '/norestart', '/L*v', (Join-Path $logDirectory 'app-uninstall.log')
-            ) -Description 'Standalone App MSI uninstall'
-            if (Test-Path -LiteralPath $appRoot) {
-              throw 'Standalone App uninstall left the App root behind.'
-            }
-            if (-not (Test-Path -LiteralPath $runtimeRoot) -or
-                -not (Test-Path -LiteralPath $dataRoot) -or
-                $null -eq (Get-Service -Name $serviceName -ErrorAction SilentlyContinue)) {
-              throw 'Standalone App uninstall touched Runtime-owned state.'
-            }
-
-            Invoke-ExpectSuccess -Path $msiexec -Arguments @(
-              '/x', $runtimeMsi, '/qn', '/norestart', '/L*v', (Join-Path $logDirectory 'runtime-inactive-uninstall.log')
-            ) -Description 'Inactive Runtime MSI uninstall'
-            if ((Get-Service -Name $serviceName -ErrorAction SilentlyContinue) -or
-                (Test-Path -LiteralPath $runtimeRoot) -or
-                (Test-Path -LiteralPath $dataRoot) -or
-                (Test-Path -LiteralPath $seedRegistry)) {
-              throw 'Inactive Runtime uninstall left its service, Program Files, ProgramData v1, or installer seed behind.'
-            }
-
-            Invoke-ExpectSuccess -Path $setup -Arguments @(
-              '-uninstall', '-quiet', '-norestart', '-log', (Join-Path $logDirectory 'bundle-registration-uninstall.log')
-            ) -Description 'Bundle registration cleanup'
-            $setupAttempted = $false
-            $evidence = [ordered]@{
-              schema_version = 1
-              version = $env:PACKAGE_VERSION
-              windows_build = [Environment]::OSVersion.Version.Build
-              runner = $env:RUNNER_NAME
-              completed_at_utc = [DateTime]::UtcNow.ToString('O')
-              checks = @(
-                'install', 'service-running', 'failure-actions-present', 'diagnose-json',
-                'active-runtime-refusal', 'app-independent-uninstall', 'inactive-runtime-cleanup'
-              )
-            } | ConvertTo-Json -Depth 5
-            [IO.File]::WriteAllText((Join-Path $logDirectory 'evidence.json'), $evidence, [Text.UTF8Encoding]::new($false))
-          }
-          finally {
-            if ((Test-Path -LiteralPath $activeMarker -PathType Leaf) -and
-                [IO.File]::ReadAllText($activeMarker) -ceq $fixture) {
-              Remove-Item -LiteralPath $activeMarker -Force
-            }
-            if ($setupAttempted -and (Test-Path -LiteralPath $setup -PathType Leaf)) {
-              try {
-                $null = Invoke-NativeProcess -Path $setup -Arguments @(
-                  '-uninstall', '-quiet', '-norestart', '-log', (Join-Path $logDirectory 'bundle-finally-cleanup.log')
-                )
-              }
-              catch {
-                Write-Warning "Bundle cleanup after smoke failure also failed: $($_.Exception.Message)"
-              }
-            }
-          }
-
-      - name: Upload Windows 11 smoke evidence
-        if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: windows11-installer-smoke-${{ steps.metadata.outputs.release_tag }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}\distraction-firewall-windows11-smoke-logs
-          if-no-files-found: warn
-          retention-days: 90
+          expected_prerelease=false
+          [[ "$VERSION" == *-* ]] && expected_prerelease=true
+          release_json="$(gh api \
+            -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "/repos/$REPOSITORY/releases/tags/$RELEASE_TAG")"
+          if [[ "$(jq -r '.draft' <<<"$release_json")" != true ||
+                "$(jq -r '.prerelease' <<<"$release_json")" != "$expected_prerelease" ||
+                "$(jq -r '.tag_name' <<<"$release_json")" != "$RELEASE_TAG" ||
+                "$(jq -r '.name' <<<"$release_json")" != "Distraction Firewall $VERSION" ||
+                "$(jq -r '.target_commitish' <<<"$release_json")" != "$RELEASE_SHA" ]]; then
+            echo 'The created draft Release metadata does not match the approved candidate.' >&2
+            exit 1
+          fi

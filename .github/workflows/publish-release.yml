@@ -1,0 +1,430 @@
+name: Publish reviewed Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing reviewed draft Release tag
+        required: true
+        type: string
+      release_commit:
+        description: Exact lowercase protected-main commit referenced by the annotated tag
+        required: true
+        type: string
+      confirmation:
+        description: Type PUBLISH-REVIEWED-DRAFT
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-publication-${{ inputs.release_tag }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Release / publish reviewed draft
+    if: ${{ github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: release-publication
+    permissions:
+      actions: read
+      attestations: read
+      contents: write
+    steps:
+      - name: Revalidate protected main, annotated tag, draft, and exact candidate bytes
+        shell: bash
+        env:
+          CONFIRMATION: ${{ inputs.confirmation }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          DISPATCH_REF: ${{ github.ref }}
+          DISPATCH_SHA: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_COMMIT: ${{ inputs.release_commit }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          strict_tag_pattern='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[A-Za-z-][0-9A-Za-z-]*))*))?$'
+          if [[ "$CONFIRMATION" != PUBLISH-REVIEWED-DRAFT ||
+                "$DEFAULT_BRANCH" != main ||
+                "$DISPATCH_REF" != refs/heads/main ||
+                ! "$DISPATCH_SHA" =~ ^[0-9a-f]{40}$ ||
+                ! "$RELEASE_COMMIT" =~ ^[0-9a-f]{40}$ ||
+                ! "$RELEASE_TAG" =~ $strict_tag_pattern ||
+                "$DISPATCH_SHA" != "$RELEASE_COMMIT" ]]; then
+            echo 'Publication inputs do not exactly identify the current protected-main release.' >&2
+            exit 1
+          fi
+
+          api() {
+            gh api -H 'Accept: application/vnd.github+json' \
+              -H 'X-GitHub-Api-Version: 2022-11-28' "$1"
+          }
+          verify_protected_main_and_annotated_tag() {
+            local branch_json tag_json tag_type tag_object_sha object_json
+            branch_json="$(api "/repos/$REPOSITORY/branches/main")"
+            if [[ "$(jq -r '.name' <<<"$branch_json")" != main ||
+                  "$(jq -r '.protected' <<<"$branch_json")" != true ||
+                  "$(jq -r '.commit.sha' <<<"$branch_json")" != "$RELEASE_COMMIT" ]]; then
+              echo 'The publication commit is not the exact current protected main commit.' >&2
+              return 1
+            fi
+
+            tag_json="$(api "/repos/$REPOSITORY/git/ref/tags/$RELEASE_TAG")"
+            tag_type="$(jq -r '.object.type' <<<"$tag_json")"
+            tag_object_sha="$(jq -r '.object.sha' <<<"$tag_json")"
+            if [[ "$(jq -r '.ref' <<<"$tag_json")" != "refs/tags/$RELEASE_TAG" ||
+                  "$tag_type" != tag ]]; then
+              echo 'Publication requires the exact annotated release tag.' >&2
+              return 1
+            fi
+            for _ in {1..8}; do
+              [[ "$tag_object_sha" =~ ^[0-9a-f]{40}$ ]] || return 1
+              [[ "$tag_type" == commit ]] && break
+              [[ "$tag_type" == tag ]] || return 1
+              object_json="$(api "/repos/$REPOSITORY/git/tags/$tag_object_sha")"
+              tag_type="$(jq -r '.object.type' <<<"$object_json")"
+              tag_object_sha="$(jq -r '.object.sha' <<<"$object_json")"
+            done
+            if [[ "$tag_type" != commit || "$tag_object_sha" != "$RELEASE_COMMIT" ]]; then
+              echo 'The release tag no longer resolves exactly to the approved commit.' >&2
+              return 1
+            fi
+          }
+
+          verify_protected_main_and_annotated_tag
+
+          release_json="$(api "/repos/$REPOSITORY/releases/tags/$RELEASE_TAG")"
+          version="${RELEASE_TAG#v}"
+          expected_prerelease=false
+          [[ "$version" == *-* ]] && expected_prerelease=true
+          if [[ "$(jq -r '.draft' <<<"$release_json")" != true ||
+                "$(jq -r '.prerelease' <<<"$release_json")" != "$expected_prerelease" ||
+                "$(jq -r '.tag_name' <<<"$release_json")" != "$RELEASE_TAG" ||
+                "$(jq -r '.name' <<<"$release_json")" != "Distraction Firewall $version" ||
+                "$(jq -r '.target_commitish' <<<"$release_json")" != "$RELEASE_COMMIT" ]]; then
+            echo 'Only the exact reviewed draft metadata for this candidate can be published.' >&2
+            exit 1
+          fi
+
+          mkdir release
+          gh release download "$RELEASE_TAG" --repo "$REPOSITORY" --dir release
+          promotion="release/distraction-firewall-$version.windows11-smoke-promotion.json"
+          promotion_provenance="release/distraction-firewall-$version.windows11-smoke-promotion.provenance.bundle.json"
+          manifest="release/distraction-firewall-$version.candidate-manifest.json"
+          subjects="release/distraction-firewall-$version.candidate-subjects.sha256"
+          provenance="release/distraction-firewall-$version.provenance.bundle.json"
+          hosted_evidence="release/distraction-firewall-$version.hosted-evidence.json"
+          expected_names=(
+            "distraction-firewall-$version.candidate-manifest.json"
+            "distraction-firewall-$version.candidate-subjects.sha256"
+            "distraction-firewall-$version.hosted-evidence.json"
+            "distraction-firewall-$version.provenance.bundle.json"
+            "distraction-firewall-$version.sha256"
+            "distraction-firewall-$version.spdx.json"
+            "distraction-firewall-$version.windows11-smoke-promotion.json"
+            "distraction-firewall-$version.windows11-smoke-promotion.provenance.bundle.json"
+            "distraction-firewall-app-$version-win-x64.msi"
+            "distraction-firewall-runtime-$version-win-x64.msi"
+            "distraction-firewall-setup-$version-win-x64.exe"
+          )
+          mapfile -t actual_names < <(
+            find release -maxdepth 1 \( -type f -o -type l \) -printf '%f\n' | LC_ALL=C sort
+          )
+          mapfile -t sorted_expected_names < <(printf '%s\n' "${expected_names[@]}" | LC_ALL=C sort)
+          diff -u <(printf '%s\n' "${sorted_expected_names[@]}") <(printf '%s\n' "${actual_names[@]}")
+
+          jq -e \
+            --arg repository "$REPOSITORY" \
+            --arg sha "$RELEASE_COMMIT" \
+            --arg version "$version" \
+            '.schema == "distraction-firewall/build-once-candidate/v1" and
+             .version == $version and
+             .source.repository == $repository and
+             .source.commitSha == $sha and
+             .source.ref == "refs/heads/main" and
+             .source.workflowPath == ".github/workflows/release-candidate.yml" and
+             .source.workflowRef == ($repository + "/.github/workflows/release-candidate.yml@refs/heads/main") and
+             .source.artifactId == null and
+             .source.artifactDigestSha256 == null and
+             (.artifacts | keys) == ["appMsi", "checksum", "runtimeMsi", "sbom", "setupExe"] and
+             (.signing | keys) == ["configured", "disclosure", "outerPackageStatuses"]' \
+            "$manifest" >/dev/null
+          jq -e \
+            --arg sha "$RELEASE_COMMIT" \
+            --arg tag "$RELEASE_TAG" \
+            '.schema == "distraction-firewall/windows11-smoke-promotion/v1" and
+             .result == "approved" and
+             (keys == ["candidate", "localSmokeEvidenceSha256", "release", "result", "schema", "workflowActor"]) and
+             (.workflowActor | type) == "string" and
+             (.workflowActor | length) > 0 and
+             .release.tag == $tag and
+             .release.commitSha == $sha and
+             (.localSmokeEvidenceSha256 | test("^[0-9a-f]{64}$"))' \
+            "$promotion" >/dev/null
+          gh attestation verify "$promotion" \
+            --repo "$REPOSITORY" \
+            --bundle "$promotion_provenance" \
+            --signer-workflow "$REPOSITORY/.github/workflows/release.yml" \
+            --source-digest "$RELEASE_COMMIT" \
+            --source-ref "refs/tags/$RELEASE_TAG" \
+            --deny-self-hosted-runners >/dev/null
+          manifest_sha="$(sha256sum "$manifest" | awk '{print $1}')"
+          [[ "$(jq -r '.candidate.manifestSha256' "$promotion")" == "$manifest_sha" ]] || {
+            echo 'The smoke promotion record does not match the candidate manifest bytes.' >&2
+            exit 1
+          }
+          artifact_id="$(jq -r '.candidate.artifactId' "$promotion")"
+          artifact_digest="$(jq -r '.candidate.artifactDigest' "$promotion")"
+          artifact_name="$(jq -r '.candidate.artifactName' "$promotion")"
+          candidate_run_id="$(jq -r '.candidate.workflowRunId' "$promotion")"
+          if [[ ! "$artifact_id" =~ ^[1-9][0-9]*$ ||
+                ! "$candidate_run_id" =~ ^[1-9][0-9]*$ ||
+                ! "$artifact_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo 'The smoke promotion record has malformed immutable candidate identity.' >&2
+            exit 1
+          fi
+          artifact_json="$(api "/repos/$REPOSITORY/actions/artifacts/$artifact_id")"
+          run_json="$(api "/repos/$REPOSITORY/actions/runs/$candidate_run_id")"
+          candidate_run_attempt="$(jq -r '.run_attempt' <<<"$run_json")"
+          expected_artifact_name="release-candidate-$version-$RELEASE_COMMIT-$candidate_run_id-$candidate_run_attempt"
+          if [[ "$artifact_name" != "$expected_artifact_name" ||
+                "$(jq -r '.source.workflowRunId' "$manifest")" != "$candidate_run_id" ||
+                "$(jq -r '.source.workflowRunAttempt' "$manifest")" != "$candidate_run_attempt" ||
+                "$(jq -r '.id' <<<"$artifact_json")" != "$artifact_id" ||
+                "$(jq -r '.name' <<<"$artifact_json")" != "$artifact_name" ||
+                "$(jq -r '.digest' <<<"$artifact_json")" != "$artifact_digest" ||
+                "$(jq -r '.workflow_run.id' <<<"$artifact_json")" != "$candidate_run_id" ||
+                "$(jq -r '.workflow_run.head_branch' <<<"$artifact_json")" != main ||
+                "$(jq -r '.workflow_run.head_sha' <<<"$artifact_json")" != "$RELEASE_COMMIT" ||
+                "$(jq -r '.expired' <<<"$artifact_json")" != false ||
+                "$(jq -r '.size_in_bytes' <<<"$artifact_json")" -le 0 ||
+                "$(jq -r '.path' <<<"$run_json")" != '.github/workflows/release-candidate.yml' ||
+                "$(jq -r '.event' <<<"$run_json")" != workflow_dispatch ||
+                "$(jq -r '.head_branch' <<<"$run_json")" != main ||
+                "$(jq -r '.head_sha' <<<"$run_json")" != "$RELEASE_COMMIT" ||
+                "$(jq -r '.head_repository.full_name' <<<"$run_json")" != "$REPOSITORY" ||
+                "$(jq -r '.status' <<<"$run_json")" != completed ||
+                "$(jq -r '.conclusion' <<<"$run_json")" != success ]]; then
+            echo 'The candidate artifact and workflow-run metadata no longer match the draft evidence.' >&2
+            exit 1
+          fi
+
+          gh api -H 'Accept: application/vnd.github+json' \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "/repos/$REPOSITORY/actions/artifacts/$artifact_id/zip" > original-candidate.zip
+          actual_artifact_digest="sha256:$(sha256sum original-candidate.zip | awk '{print $1}')"
+          if [[ "$actual_artifact_digest" != "$artifact_digest" ]]; then
+            echo 'The downloaded original candidate archive digest does not match its immutable receipt.' >&2
+            exit 1
+          fi
+          mkdir original-candidate
+          while IFS= read -r entry; do
+            if [[ -z "$entry" || "$entry" == */ || "$entry" == *'/'* ||
+                  "$entry" == *'\'* || "$entry" == .* || "$entry" == *..* ]]; then
+              echo "Unsafe or nested original candidate archive entry: $entry" >&2
+              exit 1
+            fi
+          done < <(zipinfo -1 original-candidate.zip)
+          unzip -q original-candidate.zip -d original-candidate
+          expected_candidate_names=(
+            "distraction-firewall-$version.candidate-manifest.json"
+            "distraction-firewall-$version.candidate-subjects.sha256"
+            "distraction-firewall-$version.hosted-evidence.json"
+            "distraction-firewall-$version.provenance.bundle.json"
+            "distraction-firewall-$version.sha256"
+            "distraction-firewall-$version.spdx.json"
+            "distraction-firewall-app-$version-win-x64.msi"
+            "distraction-firewall-runtime-$version-win-x64.msi"
+            "distraction-firewall-setup-$version-win-x64.exe"
+          )
+          mapfile -t original_candidate_names < <(
+            find original-candidate -maxdepth 1 \( -type f -o -type l \) -printf '%f\n' | LC_ALL=C sort
+          )
+          mapfile -t sorted_expected_candidate_names < <(
+            printf '%s\n' "${expected_candidate_names[@]}" | LC_ALL=C sort
+          )
+          diff -u \
+            <(printf '%s\n' "${sorted_expected_candidate_names[@]}") \
+            <(printf '%s\n' "${original_candidate_names[@]}")
+          for candidate_name in "${expected_candidate_names[@]}"; do
+            cmp --silent "original-candidate/$candidate_name" "release/$candidate_name" || {
+              echo "Draft candidate asset differs from the immutable Actions artifact: $candidate_name" >&2
+              exit 1
+            }
+          done
+
+          while IFS=$'\t' read -r file_name expected_hash expected_size; do
+            file_path="release/$file_name"
+            [[ -f "$file_path" && ! -L "$file_path" ]] || {
+              echo "Manifest subject is missing or is a symlink: $file_name" >&2
+              exit 1
+            }
+            [[ "$(sha256sum "$file_path" | awk '{print $1}')" == "$expected_hash" ]] || {
+              echo "Manifest subject hash mismatch: $file_name" >&2
+              exit 1
+            }
+            [[ "$(stat -c '%s' "$file_path")" == "$expected_size" ]] || {
+              echo "Manifest subject size mismatch: $file_name" >&2
+              exit 1
+            }
+          done < <(jq -r '.artifacts | to_entries[] | [.value.fileName, .value.sha256, (.value.sizeBytes|tostring)] | @tsv' "$manifest")
+
+          jq -e \
+            --arg manifestSha "$manifest_sha" \
+            --arg sha "$RELEASE_COMMIT" \
+            --argjson runAttempt "$candidate_run_attempt" \
+            --argjson runId "$candidate_run_id" \
+            '.schema == "distraction-firewall/hosted-candidate-validation/v1" and
+             .result == "passed" and
+             .candidateManifestSha256 == $manifestSha and
+             .sourceCommitSha == $sha and
+             .workflowRunId == $runId and
+             .workflowRunAttempt == $runAttempt' \
+            "$hosted_evidence" >/dev/null
+
+          expected_subject_names=(
+            "distraction-firewall-$version.candidate-manifest.json"
+            "distraction-firewall-$version.hosted-evidence.json"
+            "distraction-firewall-$version.sha256"
+            "distraction-firewall-$version.spdx.json"
+            "distraction-firewall-app-$version-win-x64.msi"
+            "distraction-firewall-runtime-$version-win-x64.msi"
+            "distraction-firewall-setup-$version-win-x64.exe"
+          )
+          subject_names=()
+          while IFS= read -r subject_line; do
+            if [[ ${#subject_line} -le 66 ||
+                  ! "${subject_line:0:64}" =~ ^[0-9a-f]{64}$ ||
+                  "${subject_line:64:2}" != '  ' ]]; then
+              echo 'The candidate subject checksum inventory contains a malformed line.' >&2
+              exit 1
+            fi
+            subject_names+=("${subject_line:66}")
+          done < "$subjects"
+          mapfile -t sorted_expected_subject_names < <(
+            printf '%s\n' "${expected_subject_names[@]}" | LC_ALL=C sort
+          )
+          mapfile -t sorted_subject_names < <(printf '%s\n' "${subject_names[@]}" | LC_ALL=C sort)
+          diff -u \
+            <(printf '%s\n' "${sorted_expected_subject_names[@]}") \
+            <(printf '%s\n' "${sorted_subject_names[@]}")
+          (cd release && sha256sum --strict --check "distraction-firewall-$version.sha256")
+          (cd release && sha256sum --strict --check "distraction-firewall-$version.candidate-subjects.sha256")
+
+          for subject_name in "${expected_subject_names[@]}"; do
+            gh attestation verify "release/$subject_name" \
+              --repo "$REPOSITORY" \
+              --bundle "$provenance" \
+              --signer-workflow "$REPOSITORY/.github/workflows/release-candidate.yml" \
+              --source-digest "$RELEASE_COMMIT" \
+              --source-ref refs/heads/main \
+              --deny-self-hosted-runners >/dev/null
+          done
+
+          # Freeze the exact reviewed draft inventory only after all content and
+          # provenance checks pass. Asset replacement requires a new asset ID;
+          # size/digest bind the API record to the downloaded bytes.
+          verified_release_json="$(api "/repos/$REPOSITORY/releases/tags/$RELEASE_TAG")"
+          verified_release_id="$(jq -r '.id' <<<"$verified_release_json")"
+          jq -e \
+            --argjson expectedCount "${#expected_names[@]}" \
+            --arg sha "$RELEASE_COMMIT" \
+            --arg tag "$RELEASE_TAG" \
+            --arg version "$version" \
+            --argjson prerelease "$expected_prerelease" \
+            '.draft == true and
+             .prerelease == $prerelease and
+             .tag_name == $tag and
+             .name == ("Distraction Firewall " + $version) and
+             .target_commitish == $sha and
+             (.id | type == "number") and
+             (.assets | length) == $expectedCount and
+             ([.assets[].name] | length) == ([.assets[].name] | unique | length)' \
+            <<<"$verified_release_json" >/dev/null
+          for asset_name in "${expected_names[@]}"; do
+            asset_count="$(jq --arg name "$asset_name" '[.assets[] | select(.name == $name)] | length' <<<"$verified_release_json")"
+            [[ "$asset_count" == 1 ]] || {
+              echo "Reviewed draft asset metadata is missing or duplicated: $asset_name" >&2
+              exit 1
+            }
+            asset_id="$(jq -r --arg name "$asset_name" '.assets[] | select(.name == $name) | .id' <<<"$verified_release_json")"
+            asset_size="$(jq -r --arg name "$asset_name" '.assets[] | select(.name == $name) | .size' <<<"$verified_release_json")"
+            asset_digest="$(jq -r --arg name "$asset_name" '.assets[] | select(.name == $name) | .digest' <<<"$verified_release_json")"
+            local_size="$(stat -c '%s' "release/$asset_name")"
+            local_digest="sha256:$(sha256sum "release/$asset_name" | awk '{print $1}')"
+            if [[ ! "$asset_id" =~ ^[1-9][0-9]*$ ||
+                  "$asset_size" != "$local_size" ||
+                  "$asset_digest" != "$local_digest" ]]; then
+              echo "Reviewed draft asset API identity does not match verified bytes: $asset_name" >&2
+              exit 1
+            fi
+          done
+          jq -r '.assets | sort_by(.name)[] | [.name, (.id|tostring), (.size|tostring), .digest] | @tsv' \
+            <<<"$verified_release_json" > verified-release-assets.tsv
+
+          # Redownload once at the publication boundary. A replacement during
+          # the earlier checks changes either these bytes or the final API
+          # identity checked immediately below.
+          mkdir publish-boundary
+          gh release download "$RELEASE_TAG" --repo "$REPOSITORY" --dir publish-boundary
+          mapfile -t boundary_names < <(
+            find publish-boundary -maxdepth 1 \( -type f -o -type l \) -printf '%f\n' | LC_ALL=C sort
+          )
+          diff -u <(printf '%s\n' "${sorted_expected_names[@]}") <(printf '%s\n' "${boundary_names[@]}")
+          for asset_name in "${expected_names[@]}"; do
+            cmp --silent "release/$asset_name" "publish-boundary/$asset_name" || {
+              echo "Draft asset changed before the publication boundary: $asset_name" >&2
+              exit 1
+            }
+          done
+
+          final_release_json="$(api "/repos/$REPOSITORY/releases/tags/$RELEASE_TAG")"
+          if [[ "$(jq -r '.id' <<<"$final_release_json")" != "$verified_release_id" ]]; then
+            echo 'Draft Release identity changed before publication.' >&2
+            exit 1
+          fi
+          jq -e \
+            --argjson expectedCount "${#expected_names[@]}" \
+            --arg sha "$RELEASE_COMMIT" \
+            --arg tag "$RELEASE_TAG" \
+            --arg version "$version" \
+            --argjson prerelease "$expected_prerelease" \
+            '.draft == true and
+             .prerelease == $prerelease and
+             .tag_name == $tag and
+             .name == ("Distraction Firewall " + $version) and
+             .target_commitish == $sha and
+             (.assets | length) == $expectedCount and
+             ([.assets[].name] | length) == ([.assets[].name] | unique | length)' \
+            <<<"$final_release_json" >/dev/null
+          jq -r '.assets | sort_by(.name)[] | [.name, (.id|tostring), (.size|tostring), .digest] | @tsv' \
+            <<<"$final_release_json" > final-release-assets.tsv
+          diff -u verified-release-assets.tsv final-release-assets.tsv
+
+          for asset_name in "${expected_names[@]}"; do
+            final_asset_count="$(jq --arg name "$asset_name" '[.assets[] | select(.name == $name)] | length' <<<"$final_release_json")"
+            final_asset_id="$(jq -r --arg name "$asset_name" '.assets[] | select(.name == $name) | .id' <<<"$final_release_json")"
+            final_asset_size="$(jq -r --arg name "$asset_name" '.assets[] | select(.name == $name) | .size' <<<"$final_release_json")"
+            final_asset_digest="$(jq -r --arg name "$asset_name" '.assets[] | select(.name == $name) | .digest' <<<"$final_release_json")"
+            boundary_size="$(stat -c '%s' "publish-boundary/$asset_name")"
+            boundary_digest="sha256:$(sha256sum "publish-boundary/$asset_name" | awk '{print $1}')"
+            if [[ "$final_asset_count" != 1 ||
+                  ! "$final_asset_id" =~ ^[1-9][0-9]*$ ||
+                  "$final_asset_size" != "$boundary_size" ||
+                  "$final_asset_digest" != "$boundary_digest" ]]; then
+              echo "Publication-boundary asset API identity does not match redownloaded bytes: $asset_name" >&2
+              exit 1
+            fi
+          done
+
+          # Recheck both mutable Git refs at the final boundary. Repository
+          # writers remain a trust boundary until immutable publication; the
+          # v* tag ruleset and Immutable Releases are mandatory prerequisites.
+          verify_protected_main_and_annotated_tag
+
+          gh release edit "$RELEASE_TAG" --repo "$REPOSITORY" --draft=false

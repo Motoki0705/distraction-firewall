@@ -260,6 +260,15 @@ internal sealed class WfpPolicyStore : IWfpPolicyStore
                 "WFP installation cleanup refused foreign or altered provider/sublayer metadata.");
         }
 
+        if (provider == WfpObjectMatch.Missing && subLayer == WfpObjectMatch.Missing)
+        {
+            // WFP prevents a provider or sublayer from being deleted while another
+            // object references it. If both product objects are absent, no filter
+            // can still reference them, so an idle never-activated install is an
+            // idempotent no-op and does not need a machine-wide filter enumeration.
+            return;
+        }
+
         var filters = session.CountFiltersReferencingProductObjects();
         if (filters != 0)
         {
