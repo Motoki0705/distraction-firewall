@@ -132,6 +132,17 @@ function Assert-Condition {
     if (-not $Condition) { throw $Message }
 }
 
+function Read-StrictUtf8Json {
+    param([Parameter(Mandatory)][string]$Path)
+
+    $strictUtf8 = [Text.UTF8Encoding]::new($false, $true)
+    $text = $strictUtf8.GetString([IO.File]::ReadAllBytes($Path))
+    if ($text.Length -gt 0 -and $text[0] -eq [char]0xFEFF) {
+        $text = $text.Substring(1)
+    }
+    return $text | ConvertFrom-Json
+}
+
 function Assert-AcceptableMandatoryIntegritySddl {
     param(
         [AllowEmptyString()][Parameter(Mandatory)][string]$Sddl,
@@ -362,7 +373,7 @@ function Read-PhaseRecord {
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)][string]$ExpectedPhase
     )
-    $record = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+    $record = Read-StrictUtf8Json $Path
     Assert-Condition ([string]$record.schema -ceq 'distraction-firewall/live-validation-phase/v1') 'Phase record schema mismatch.'
     Assert-Condition ([string]$record.campaign_id -ceq [string]$campaign.campaign_id) 'Phase record campaign mismatch.'
     Assert-Condition ([string]$record.phase_nonce -ceq [string]$campaign.phase_nonce) 'Phase record nonce mismatch.'
@@ -862,7 +873,7 @@ Assert-Condition ($elevatedProcess.HasExited) 'Elevated campaign did not finish 
 Assert-Condition ($elevatedProcess.ExitCode -eq 0) "Elevated campaign failed with exit $($elevatedProcess.ExitCode)."
 $finalPath = Join-Path $evidenceRoot 'campaign-result.json'
 Assert-Condition (Test-Path -LiteralPath $finalPath -PathType Leaf) 'Elevated campaign did not return final evidence.'
-$final = Get-Content -LiteralPath $finalPath -Raw | ConvertFrom-Json
+$final = Read-StrictUtf8Json $finalPath
 Assert-Condition ([string]$final.schema -ceq 'distraction-firewall/live-validation-result/v1') 'Final evidence schema mismatch.'
 Assert-Condition ([string]$final.campaign_id -ceq [string]$campaign.campaign_id) 'Final evidence campaign mismatch.'
 Assert-Condition ([string]$final.outcome -ceq 'passed') 'Live-validation campaign did not pass.'

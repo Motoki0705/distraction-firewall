@@ -137,6 +137,17 @@ function Assert-Condition {
     }
 }
 
+function Read-StrictUtf8Json {
+    param([Parameter(Mandatory)][string]$Path)
+
+    $strictUtf8 = [Text.UTF8Encoding]::new($false, $true)
+    $text = $strictUtf8.GetString([IO.File]::ReadAllBytes($Path))
+    if ($text.Length -gt 0 -and $text[0] -eq [char]0xFEFF) {
+        $text = $text.Substring(1)
+    }
+    return $text | ConvertFrom-Json
+}
+
 function Resolve-ExistingLeaf {
     param(
         [Parameter(Mandatory)][string]$Path,
@@ -776,8 +787,8 @@ Assert-Condition ($candidateArchiveItem.Extension -ceq '.zip') 'Raw GitHub artif
 $packageRoot = (Resolve-ExistingDirectory -Path $PackageDirectory -Description 'candidate package directory').FullName
 $manifestSha256 = Get-LowerSha256 $candidateManifestItem.FullName
 $provenanceSha256 = Get-LowerSha256 $provenanceItem.FullName
-$candidate = Get-Content -LiteralPath $candidateManifestItem.FullName -Raw | ConvertFrom-Json
-$provenance = Get-Content -LiteralPath $provenanceItem.FullName -Raw | ConvertFrom-Json
+$candidate = Read-StrictUtf8Json $candidateManifestItem.FullName
+$provenance = Read-StrictUtf8Json $provenanceItem.FullName
 
 Assert-ExactProperties $candidate @('schema', 'version', 'source', 'artifacts', 'signing') @('schema', 'version', 'source', 'artifacts', 'signing') 'candidate manifest'
 Assert-Condition ([string]$candidate.schema -ceq 'distraction-firewall/build-once-candidate/v1') 'Candidate manifest schema is unsupported.'
@@ -911,7 +922,7 @@ $expectedSubjectLines = @(
 )
 $actualSubjectLines = @([IO.File]::ReadAllLines($subjectsPath))
 Assert-Condition (-not [bool](Compare-Object -ReferenceObject $expectedSubjectLines -DifferenceObject $actualSubjectLines)) 'Candidate subject checksum inventory is not the exact seven-file inventory.'
-$hostedEvidence = Get-Content -LiteralPath $hostedEvidencePath -Raw | ConvertFrom-Json
+$hostedEvidence = Read-StrictUtf8Json $hostedEvidencePath
 Assert-ExactProperties $hostedEvidence @('schema', 'result', 'candidateManifestSha256', 'sourceCommitSha', 'workflowRunId', 'workflowRunAttempt', 'checks', 'limitations') @('schema', 'result', 'candidateManifestSha256', 'sourceCommitSha', 'workflowRunId', 'workflowRunAttempt', 'checks', 'limitations') 'hosted candidate evidence'
 Assert-Condition ([string]$hostedEvidence.schema -ceq 'distraction-firewall/hosted-candidate-validation/v1' -and [string]$hostedEvidence.result -ceq 'passed') 'Hosted candidate evidence did not pass.'
 Assert-Condition ([string]$hostedEvidence.candidateManifestSha256 -ceq $manifestSha256) 'Hosted evidence does not bind the exact candidate manifest.'
@@ -950,7 +961,7 @@ if (-not [string]::IsNullOrWhiteSpace($RecoveryManifestPath)) {
     $recoveryManifestItem = Resolve-ExistingLeaf -Path $RecoveryManifestPath -Description 'Runtime recovery manifest'
     $recoveryRoot = (Resolve-ExistingDirectory -Path $RecoveryPackageDirectory -Description 'Runtime recovery package directory').FullName
     $recoveryManifestSha256 = Get-LowerSha256 $recoveryManifestItem.FullName
-    $recovery = Get-Content -LiteralPath $recoveryManifestItem.FullName -Raw | ConvertFrom-Json
+    $recovery = Read-StrictUtf8Json $recoveryManifestItem.FullName
     Assert-ExactProperties $recovery @('schema', 'incidentId', 'approvedForMachineRecovery', 'mode', 'runtimeMsi', 'expectedInstalled', 'orphanBundleProviderKeys', 'orphanPackageCaches') @('schema', 'incidentId', 'approvedForMachineRecovery', 'mode', 'runtimeMsi', 'expectedInstalled', 'orphanBundleProviderKeys', 'orphanPackageCaches') 'Runtime recovery manifest'
     Assert-Condition ([string]$recovery.schema -ceq 'distraction-firewall/runtime-recovery/v1') 'Runtime recovery manifest schema is unsupported.'
     Assert-ApprovedRecoveryIncident $recovery $recoveryManifestSha256

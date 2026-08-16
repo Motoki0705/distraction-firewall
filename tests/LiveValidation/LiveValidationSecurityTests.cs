@@ -339,6 +339,180 @@ public sealed class LiveValidationSecurityTests
     }
 
     [Fact]
+    public void Every_json_file_read_is_strict_utf8_and_preserves_non_ascii_text_under_windows_powershell_5_1()
+    {
+        var sources = new[]
+        {
+            ReadLiveValidationFile("Get-BuildOnceCandidate.ps1"),
+            ReadLiveValidationFile("New-LiveValidationCampaign.ps1"),
+            ReadLiveValidationFile("templates", "Start-Campaign.ps1.template"),
+            ReadLiveValidationFile("templates", "Invoke-ElevatedPhase.ps1.template"),
+        };
+
+        foreach (var source in sources)
+        {
+            Assert.Contains("function Read-StrictUtf8Json", source, StringComparison.Ordinal);
+            Assert.Contains("[Text.UTF8Encoding]::new($false, $true)", source, StringComparison.Ordinal);
+            Assert.Contains("[IO.File]::ReadAllBytes($Path)", source, StringComparison.Ordinal);
+            Assert.DoesNotContain("Get-Content", source, StringComparison.OrdinalIgnoreCase);
+        }
+
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string script = """
+            $ErrorActionPreference = 'Stop'
+            Set-StrictMode -Version Latest
+            $root = $env:LIVE_VALIDATION_REPOSITORY_ROOT
+            $fixtureRoot = [IO.Path]::Combine([IO.Path]::GetTempPath(), "dfw-strict-utf8-$([Guid]::NewGuid().ToString('N'))")
+            [void][IO.Directory]::CreateDirectory($fixtureRoot)
+            try {
+              $validPath = [IO.Path]::Combine($fixtureRoot, 'system-baseline.json')
+              $invalidPath = [IO.Path]::Combine($fixtureRoot, 'invalid-utf8.json')
+              [IO.File]::WriteAllText($validPath, '{"interfaceAlias":"イーサネット"}', [Text.UTF8Encoding]::new($false, $true))
+              [IO.File]::WriteAllBytes($invalidPath, [byte[]]@(0x7B,0x22,0x76,0x61,0x6C,0x75,0x65,0x22,0x3A,0x22,0xC3,0x28,0x22,0x7D))
+              $files = @(
+                'eng\live-validation\Get-BuildOnceCandidate.ps1',
+                'eng\live-validation\New-LiveValidationCampaign.ps1',
+                'eng\live-validation\templates\Start-Campaign.ps1.template',
+                'eng\live-validation\templates\Invoke-ElevatedPhase.ps1.template'
+              )
+              foreach ($relative in $files) {
+                $path = [IO.Path]::Combine($root, $relative)
+                $tokens = $null
+                $errors = $null
+                $ast = [Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors)
+                if ($errors.Count -ne 0) { throw "$relative : $($errors.Message -join '; ')" }
+                $functionAst = $ast.Find({
+                  param($node)
+                  $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Read-StrictUtf8Json'
+                }, $true)
+                if ($null -eq $functionAst) { throw "$relative does not define Read-StrictUtf8Json." }
+                . ([ScriptBlock]::Create($functionAst.Extent.Text))
+                $record = Read-StrictUtf8Json $validPath
+                if ([string]$record.interfaceAlias -cne 'イーサネット') { throw "$relative corrupted a UTF-8 interface alias." }
+                $invalidRejected = $false
+                try { $null = Read-StrictUtf8Json $invalidPath }
+                catch { $invalidRejected = $true }
+                if (-not $invalidRejected) { throw "$relative accepted malformed UTF-8." }
+              }
+              'strict-utf8=passed'
+            }
+            finally {
+              if ([IO.Directory]::Exists($fixtureRoot)) { [IO.Directory]::Delete($fixtureRoot, $true) }
+            }
+            """;
+
+        var result = RunWindowsPowerShell(script);
+
+        Assert.True(
+            result.ExitCode == 0,
+            $"Windows PowerShell strict UTF-8 fixture failed.{Environment.NewLine}stdout:{Environment.NewLine}{result.StandardOutput}{Environment.NewLine}stderr:{Environment.NewLine}{result.StandardError}");
+        Assert.Contains("strict-utf8=passed", result.StandardOutput, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Elevated_memory_script_initializes_script_scoped_teardown_and_installer_state()
+    {
+        var child = ReadLiveValidationFile("templates", "Invoke-ElevatedPhase.ps1.template");
+        Assert.Contains("$script:installerRoot = [IO.Path]::Combine($windowsDirectory, 'Installer')", child, StringComparison.Ordinal);
+        Assert.Contains("$script:stageCreatedByCampaign = $false", child, StringComparison.Ordinal);
+        Assert.Contains("[IO.Path]::GetFullPath($script:installerRoot)", child, StringComparison.Ordinal);
+        Assert.Contains("if ($script:stageCreatedByCampaign)", child, StringComparison.Ordinal);
+        Assert.DoesNotContain("\n$installerRoot = [IO.Path]::Combine($windowsDirectory, 'Installer')", child, StringComparison.Ordinal);
+        Assert.DoesNotContain("\n$stageCreatedByCampaign = $false", child, StringComparison.Ordinal);
+        var strictMode = child.IndexOf("Set-StrictMode -Version Latest", StringComparison.Ordinal);
+        var stageInitializer = child.IndexOf("$script:stageCreatedByCampaign = $false", StringComparison.Ordinal);
+        var firstThrow = child.IndexOf("throw ", strictMode, StringComparison.Ordinal);
+        Assert.True(
+            strictMode >= 0 && stageInitializer > strictMode && stageInitializer < firstThrow,
+            "Trap state must be initialized immediately after StrictMode and before the first throwable operation.");
+
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string script = """
+            $ErrorActionPreference = 'Stop'
+            $templatePath = [IO.Path]::Combine($env:LIVE_VALIDATION_REPOSITORY_ROOT, 'eng', 'live-validation', 'templates', 'Invoke-ElevatedPhase.ps1.template')
+            $tokens = $null
+            $errors = $null
+            $ast = [Management.Automation.Language.Parser]::ParseFile($templatePath, [ref]$tokens, [ref]$errors)
+            if ($errors.Count -ne 0) { throw ($errors.Message -join '; ') }
+            $installerInit = $ast.Find({
+              param($node)
+              $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+                $node.Extent.Text -ceq '$script:installerRoot = [IO.Path]::Combine($windowsDirectory, ''Installer'')'
+            }, $true)
+            $stageInit = $ast.Find({
+              param($node)
+              $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+                $node.Extent.Text -ceq '$script:stageCreatedByCampaign = $false'
+            }, $true)
+            if ($null -eq $installerInit -or $null -eq $stageInit) { throw 'Script-scoped initializers were not found.' }
+            $memoryText = @"
+            Set-StrictMode -Version Latest
+            `$windowsDirectory = 'C:\Windows'
+            $($installerInit.Extent.Text)
+            $($stageInit.Extent.Text)
+            function Get-ScopeProbe {
+              [pscustomobject]@{
+                installerRoot = `$script:installerRoot
+                stageCreatedByCampaign = `$script:stageCreatedByCampaign
+              }
+            }
+            `$probe = Get-ScopeProbe
+            if (`$probe.installerRoot -cne 'C:\Windows\Installer') { throw 'installerRoot was not visible from function script scope.' }
+            if (`$probe.stageCreatedByCampaign -ne `$false) { throw 'stageCreatedByCampaign was not visible from function script scope.' }
+            'memory-script-scope=passed'
+            "@
+            $output = & ([ScriptBlock]::Create($memoryText))
+            if ($output -notcontains 'memory-script-scope=passed') { throw 'Memory ScriptBlock scope probe did not complete.' }
+            $output
+            """;
+
+        var result = RunWindowsPowerShell(script);
+
+        Assert.True(
+            result.ExitCode == 0,
+            $"Windows PowerShell memory ScriptBlock fixture failed.{Environment.NewLine}stdout:{Environment.NewLine}{result.StandardOutput}{Environment.NewLine}stderr:{Environment.NewLine}{result.StandardError}");
+        Assert.Contains("memory-script-scope=passed", result.StandardOutput, StringComparison.Ordinal);
+
+        const string earlyFatalScript = """
+            $ErrorActionPreference = 'Stop'
+            $templatePath = [IO.Path]::Combine($env:LIVE_VALIDATION_REPOSITORY_ROOT, 'eng', 'live-validation', 'templates', 'Invoke-ElevatedPhase.ps1.template')
+            $tokens = $null
+            $errors = $null
+            $ast = [Management.Automation.Language.Parser]::ParseFile($templatePath, [ref]$tokens, [ref]$errors)
+            if ($errors.Count -ne 0) { throw ($errors.Message -join '; ') }
+            $stageInit = $ast.Find({
+              param($node)
+              $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+                $node.Extent.Text -ceq '$script:stageCreatedByCampaign = $false'
+            }, $true)
+            $trapAst = $ast.Find({ param($node) $node -is [Management.Automation.Language.TrapStatementAst] }, $true)
+            if ($null -eq $stageInit -or $null -eq $trapAst) { throw 'Early-fatal fixture could not find the initializer or trap.' }
+            $memoryText = @"
+            Set-StrictMode -Version Latest
+            $($stageInit.Extent.Text)
+            $($trapAst.Extent.Text)
+            throw 'deliberate-early-fatal'
+            "@
+            & ([ScriptBlock]::Create($memoryText))
+            """;
+
+        var earlyFatalResult = RunWindowsPowerShell(earlyFatalScript);
+        var earlyFatalDiagnostics = earlyFatalResult.StandardOutput + Environment.NewLine + earlyFatalResult.StandardError;
+        Assert.Equal(1, earlyFatalResult.ExitCode);
+        Assert.Contains("deliberate-early-fatal", earlyFatalDiagnostics, StringComparison.Ordinal);
+        Assert.DoesNotContain("Variable '$script:stageCreatedByCampaign' cannot be retrieved", earlyFatalDiagnostics, StringComparison.Ordinal);
+        Assert.DoesNotContain("VariableIsUndefined", earlyFatalDiagnostics, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Embedded_native_inspection_code_compiles_under_windows_powershell_5_1_without_calling_native_APIs()
     {
         var child = ReadLiveValidationFile("templates", "Invoke-ElevatedPhase.ps1.template");

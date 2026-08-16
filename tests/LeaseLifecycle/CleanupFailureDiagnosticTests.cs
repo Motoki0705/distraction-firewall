@@ -74,12 +74,13 @@ public sealed class CleanupFailureDiagnosticTests
         Assert.True(CleanupFailureDiagnostic.TryWrite(paths, diagnostic));
 
         var repositoryRoot = FindRepositoryRoot();
-        var childTemplate = File.ReadAllText(Path.Combine(
+        var templatePath = Path.Combine(
             repositoryRoot,
             "eng",
             "live-validation",
             "templates",
-            "Invoke-ElevatedPhase.ps1.template"));
+            "Invoke-ElevatedPhase.ps1.template");
+        var childTemplate = File.ReadAllText(templatePath);
         var reader = ExtractBetween(
             childTemplate,
             "function Copy-ProtectedCleanupDiagnostic {",
@@ -97,6 +98,16 @@ public sealed class CleanupFailureDiagnosticTests
                 param([Parameter(Mandatory)][string]$Path)
                 return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
             }
+            $tokens = $null
+            $errors = $null
+            $templateAst = [Management.Automation.Language.Parser]::ParseFile($env:DF_TEMPLATE_PATH, [ref]$tokens, [ref]$errors)
+            Assert-Condition ($errors.Count -eq 0) 'The live-validation template did not parse.'
+            $strictUtf8ReaderAst = $templateAst.Find({
+                param($node)
+                $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Read-StrictUtf8Json'
+            }, $true)
+            Assert-Condition ($null -ne $strictUtf8ReaderAst) 'The strict UTF-8 JSON reader was not found.'
+            . ([ScriptBlock]::Create($strictUtf8ReaderAst.Extent.Text))
             $campaign = [pscustomobject]@{
                 paths = [pscustomobject]@{ runtime_data_root = $env:DF_DIAGNOSTIC_ROOT }
             }
@@ -114,6 +125,7 @@ public sealed class CleanupFailureDiagnosticTests
             {
                 ["DF_DIAGNOSTIC_ROOT"] = paths.DataRoot,
                 ["DF_EVIDENCE_ROOT"] = evidenceRoot,
+                ["DF_TEMPLATE_PATH"] = templatePath,
             });
 
         Assert.True(

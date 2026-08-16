@@ -4,6 +4,7 @@
 param()
 
 Set-StrictMode -Version Latest
+$script:stageCreatedByCampaign = $false
 $ErrorActionPreference = 'Stop'
 
 $windowsDirectory = [IO.Path]::GetFullPath([Environment]::GetFolderPath([Environment+SpecialFolder]::Windows)).TrimEnd('\')
@@ -39,7 +40,7 @@ $stageEvidenceRoot = Join-Path $stageRoot 'evidence'
 $stageScratchRoot = Join-Path $stageRoot 'scratch'
 $msiexec = [IO.Path]::Combine($systemDirectory, 'msiexec.exe')
 $netsh = [IO.Path]::Combine($systemDirectory, 'netsh.exe')
-$installerRoot = [IO.Path]::Combine($windowsDirectory, 'Installer')
+$script:installerRoot = [IO.Path]::Combine($windowsDirectory, 'Installer')
 $serviceName = [string]$campaign.fixed.ServiceName
 $installedCandidate = $false
 $candidateInstallAttempted = $false
@@ -47,7 +48,6 @@ $campaignError = $null
 $cleanupErrors = [Collections.Generic.List[string]]::new()
 $steps = [Collections.Generic.List[object]]::new()
 $candidateLocalPackages = @()
-$stageCreatedByCampaign = $false
 $approvedRecoveryManifestSha256 = '29962be5b7992ac17b13ac4aaa0c46320c5a5b4fba481e3b1e46a36bad9366e2'
 $approvedRecoveryExistingService = [ordered]@{
     size = [int64]162816
@@ -115,6 +115,17 @@ function Assert-Condition {
         [Parameter(Mandatory)][string]$Message
     )
     if (-not $Condition) { throw $Message }
+}
+
+function Read-StrictUtf8Json {
+    param([Parameter(Mandatory)][string]$Path)
+
+    $strictUtf8 = [Text.UTF8Encoding]::new($false, $true)
+    $text = $strictUtf8.GetString([IO.File]::ReadAllBytes($Path))
+    if ($text.Length -gt 0 -and $text[0] -eq [char]0xFEFF) {
+        $text = $text.Substring(1)
+    }
+    return $text | ConvertFrom-Json
 }
 
 function Assert-AcceptableMandatoryIntegritySddl {
@@ -301,7 +312,7 @@ function Read-SmokePhase {
     $deadline = [DateTime]::UtcNow.AddMinutes(12)
     while ([DateTime]::UtcNow -lt $deadline) {
         if (Test-Path -LiteralPath $path -PathType Leaf) {
-            $record = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+            $record = Read-StrictUtf8Json $path
             Assert-Condition ([string]$record.schema -ceq 'distraction-firewall/live-validation-phase/v1') 'Standard-user phase schema mismatch.'
             Assert-Condition ([string]$record.campaign_id -ceq [string]$campaign.campaign_id) 'Standard-user phase campaign mismatch.'
             Assert-Condition ([string]$record.phase_nonce -ceq [string]$campaign.phase_nonce) 'Standard-user phase nonce mismatch.'
@@ -1178,7 +1189,7 @@ function Copy-ProtectedCleanupDiagnostic {
     $item = Get-Item -LiteralPath $diagnosticPath -Force
     Assert-Condition (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -eq 0) 'Cleanup diagnostic is a reparse point.'
     Assert-Condition ($item.Length -le 1048576) 'Cleanup diagnostic exceeds the fixed 1 MiB limit.'
-    $diagnostic = Get-Content -LiteralPath $diagnosticPath -Raw | ConvertFrom-Json
+    $diagnostic = Read-StrictUtf8Json $diagnosticPath
     $expectedProperties = @('schema_version', 'occurred_at_utc', 'operation', 'stage', 'backend', 'backend_operation', 'exceptions') | Sort-Object
     $actualProperties = @($diagnostic.PSObject.Properties.Name | Sort-Object)
     Assert-Condition (-not [bool](Compare-Object -ReferenceObject $expectedProperties -DifferenceObject $actualProperties)) 'Cleanup diagnostic has an unexpected field set.'
@@ -1390,11 +1401,11 @@ Assert-LeafFingerprint $campaign.input_records.artifact_archive_path ([int64]$ca
 Assert-PinnedEvidenceInputs
 $pendingBaselinePath = Join-Path $stateRoot 'pending-rename-baseline.json'
 Assert-Condition (Test-Path -LiteralPath $pendingBaselinePath -PathType Leaf) 'Non-elevated parent did not provide a pending-rename baseline.'
-$pendingRenameBaseline = Get-Content -LiteralPath $pendingBaselinePath -Raw | ConvertFrom-Json
+$pendingRenameBaseline = Read-StrictUtf8Json $pendingBaselinePath
 Assert-PendingRenameEquals $pendingRenameBaseline (Get-PendingRenameSnapshot) 'UAC boundary'
 $systemBaselinePath = Join-Path $stateRoot 'system-baseline.json'
 Assert-Condition (Test-Path -LiteralPath $systemBaselinePath -PathType Leaf) 'Non-elevated parent did not provide a system baseline.'
-$systemBaseline = Get-Content -LiteralPath $systemBaselinePath -Raw | ConvertFrom-Json
+$systemBaseline = Read-StrictUtf8Json $systemBaselinePath
 Assert-SystemBaselineEquals $systemBaseline (Get-SystemBaseline) 'UAC boundary'
 
 Assert-Condition (-not (Test-Path -LiteralPath $stageRoot)) 'Fixed campaign stage already exists.'
