@@ -409,6 +409,52 @@ public sealed class LiveValidationSecurityTests
     }
 
     [Fact]
+    public void Missing_task_folder_accepts_the_exact_file_not_found_hresult_regardless_of_exception_type()
+    {
+        var child = ReadLiveValidationFile("templates", "Invoke-ElevatedPhase.ps1.template");
+        var taskState = ExtractBetween(child, "function Get-TaskFolderState", "function Get-WfpOwnedState");
+        Assert.Contains("catch {", taskState, StringComparison.Ordinal);
+        Assert.DoesNotContain("catch [Runtime.InteropServices.COMException]", taskState, StringComparison.Ordinal);
+
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        const string script = """
+            $ErrorActionPreference = 'Stop'
+            Set-StrictMode -Version Latest
+            $templatePath = [IO.Path]::Combine($env:LIVE_VALIDATION_REPOSITORY_ROOT, 'eng', 'live-validation', 'templates', 'Invoke-ElevatedPhase.ps1.template')
+            $tokens = $null
+            $errors = $null
+            $ast = [Management.Automation.Language.Parser]::ParseFile($templatePath, [ref]$tokens, [ref]$errors)
+            if ($errors.Count -ne 0) { throw ($errors.Message -join '; ') }
+            $functionAst = $ast.Find({
+              param($node)
+              $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Test-IsMissingTaskFolderException'
+            }, $true)
+            if ($null -eq $functionAst) { throw 'Missing task-folder exception classifier.' }
+            . ([ScriptBlock]::Create($functionAst.Extent.Text))
+
+            $fileNotFound = [IO.FileNotFoundException]::new('fixture')
+            if (-not (Test-IsMissingTaskFolderException $fileNotFound)) { throw 'FileNotFoundException 0x80070002 was rejected.' }
+            foreach ($hresult in @(-2147024894, -2147023728)) {
+              $comFailure = [Runtime.InteropServices.COMException]::new('fixture', $hresult)
+              if (-not (Test-IsMissingTaskFolderException $comFailure)) { throw "Missing HRESULT was rejected: $hresult" }
+            }
+            if (Test-IsMissingTaskFolderException ([UnauthorizedAccessException]::new('fixture'))) { throw 'An unrelated HRESULT was accepted.' }
+            'task-folder-missing=passed'
+            """;
+
+        var result = RunWindowsPowerShell(script);
+
+        Assert.True(
+            result.ExitCode == 0,
+            $"Windows PowerShell fixture failed. stdout={result.StandardOutput} stderr={result.StandardError}");
+        Assert.Contains("task-folder-missing=passed", result.StandardOutput, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Fatal_diagnostic_preserves_the_bounded_campaign_body_error_when_postflight_also_throws()
     {
         var child = ReadLiveValidationFile("templates", "Invoke-ElevatedPhase.ps1.template");
