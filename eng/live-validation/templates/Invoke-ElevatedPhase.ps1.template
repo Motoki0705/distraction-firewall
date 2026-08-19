@@ -1081,13 +1081,18 @@ function Assert-AppAbsent {
     Assert-Condition (-not (Test-Path -LiteralPath $campaign.paths.app_root)) 'App Program Files root remains.'
 }
 
+function Test-IsMissingTaskFolderException {
+    param([Parameter(Mandatory)][Exception]$Exception)
+    return [int]$Exception.HResult -in @(-2147024894, -2147023728)
+}
+
 function Get-TaskFolderState {
     $scheduler = New-Object -ComObject 'Schedule.Service'
     try {
         $scheduler.Connect()
         try { $folder = $scheduler.GetFolder('\DistractionFirewall') }
-        catch [Runtime.InteropServices.COMException] {
-            if ($_.Exception.HResult -in @(-2147024894, -2147023728)) {
+        catch {
+            if (Test-IsMissingTaskFolderException $_.Exception) {
                 return [pscustomobject][ordered]@{ exists = $false; task_count = 0; folder_count = 0 }
             }
             throw
